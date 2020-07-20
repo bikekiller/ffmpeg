@@ -27,6 +27,12 @@
 #define AVFILTER_DNN_INTERFACE_H
 
 #include <stdint.h>
+#include <libavutil/frame.h>
+
+typedef enum {
+    INFERENCE_EVENT_NONE,
+    INFERENCE_EVENT_EOS,
+} FF_INFERENCE_EVENT;
 
 typedef enum {DNN_SUCCESS, DNN_ERROR} DNNReturnType;
 
@@ -66,4 +72,49 @@ typedef struct DNNModule{
 // Initializes DNNModule depending on chosen backend.
 DNNModule *ff_get_dnn_module(DNNBackendType backend_type);
 
+
+typedef struct __FFBaseInference FFBaseInference;
+typedef struct __FFInferenceParam FFInferenceParam;
+
+struct __FFInferenceParam {
+    char *model;                                                                                                       
+    char *model_inputname;
+    char *model_outputname;
+    int batch_size;                                                                                                    
+    int backend;                                                                                                    
+};
+
+struct __FFBaseInference {
+    // unique infer string id
+    const char *inference_id;
+    FFInferenceParam param;
+    void *pre_proc;         // type: PreProcFunction
+    void *post_proc;        // type: PostProcFunction
+
+    DNNModule *dnn_module;
+    DNNModel *model;
+
+    // input & output of the model at execution time
+    DNNData input;
+    DNNData output;
+
+    struct SwsContext *sws_gray8_to_grayf32;
+    struct SwsContext *sws_grayf32_to_gray8;
+    struct SwsContext *sws_uv_scale;
+    int sws_uv_height;
+};
+
+FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferenceParam *param);
+
+void ff_dnn_interface_release(FFBaseInference *base);
+
+int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame);
+
+int ff_dnn_interface_get_frame(FFBaseInference *base, AVFrame **frame_out);
+
+int ff_dnn_interface_frame_queue_empty(FFBaseInference *base);
+
+int ff_dnn_interface_resource_status(FFBaseInference *base);
+
+void ff_dnn_interface_send_event(FFBaseInference *base, FF_INFERENCE_EVENT event);
 #endif

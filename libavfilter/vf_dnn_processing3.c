@@ -38,12 +38,12 @@
 
 #include "dnn_interface.h"
 
-#define OFFSET(x) offsetof(IEInferContext, x)
+#define OFFSET(x) offsetof(DnnProcessing3Context, x)
 #define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
 
 static int flush_frame(AVFilterContext *ctx, AVFilterLink *outlink, int64_t pts, int64_t *out_pts);
 
-typedef struct IEInferContext {
+typedef struct DnnProcessing3Context {
     const AVClass *class;
 
     FFBaseInference *base;
@@ -53,7 +53,7 @@ typedef struct IEInferContext {
     int    async_preproc;
     int    backend_type;
     int    already_flushed;
-} IEInferContext;
+} DnnProcessing3Context;
 
 static int query_formats(AVFilterContext *context)
 {
@@ -71,11 +71,13 @@ static int query_formats(AVFilterContext *context)
     return ff_set_common_formats(context, formats_list);
 }
 
+// don't care about hw frame for now. TODO: add later?
+#if 0
 static int config_input(AVFilterLink *inlink)
 {
     int ret = 0;
     AVFilterContext *ctx = inlink->dst;
-    IEInferContext *s = ctx->priv;
+    DnnProcessing3Context *s = ctx->priv;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(inlink->format);
     if (desc == NULL)
         return AVERROR(EINVAL);
@@ -100,11 +102,47 @@ static int config_input(AVFilterLink *inlink)
 
     return ret;
 }
+#endif
 
-static av_cold int infer_init(AVFilterContext *ctx)
+static av_cold int init(AVFilterContext *context)
+{
+    DnnProcessing2Context *ctx = context->priv;
+
+    if (!ctx->model_filename) {
+        av_log(ctx, AV_LOG_ERROR, "model file for network is not specified\n");
+        return AVERROR(EINVAL);
+    }
+    if (!ctx->model_inputname) {
+        av_log(ctx, AV_LOG_ERROR, "input name of the model network is not specified\n");
+        return AVERROR(EINVAL);
+    }
+    if (!ctx->model_outputname) {
+        av_log(ctx, AV_LOG_ERROR, "output name of the model network is not specified\n");
+        return AVERROR(EINVAL);
+    }
+
+    FFInferenceParam param = { };
+
+    param.model           = ctx->model_filename;
+    param.model_inputname = ctx->model_inputname;
+    param.model_outputname = ctx->model_outputname;
+    param.batch_size      = ctx->batch_size;
+    param.backend         = DNN_OV; // FIXME: temp for testing
+
+    ctx->dnn_interface = ff_dnn_interface_create(ctx->filter->name, &param);
+    if (!ctx->dnn_interface) {
+        av_log(ctx, AV_LOG_ERROR, "Could not create inference.\n");
+        return AVERROR(EINVAL);
+    }
+
+    return 0;
+}
+
+#if 0
+static av_cold int dnn_processing3_init(AVFilterContext *ctx)
 {
     int ret;
-    IEInferContext *s = ctx->priv;
+    DnnProcessing3Context *s = ctx->priv;
     av_assert0(s->model);
     FFInferenceParam param = { };
 
@@ -128,27 +166,28 @@ static av_cold int infer_init(AVFilterContext *ctx)
 
     return ret;
 }
+#endif
 
-static av_cold void infer_uninit(AVFilterContext *ctx)
+static av_cold void uninit(AVFilterContext *ctx)
 {
-    IEInferContext *s = ctx->priv;
+    DnnProcessing3Context *s = ctx->priv;
 
     flush_frame(ctx, NULL, 0LL, NULL);
 
-    av_base_inference_release(s->base);
+    ff_dnn_interface_release(s->dnn_interface);
 }
 
 static int flush_frame(AVFilterContext *ctx, AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
 {
     int ret = 0;
-    IEInferContext *s = ctx->priv;
+    DnnProcessing3Context *s = ctx->priv;
 
     if (s->already_flushed)
         return ret;
 
-    while (!av_base_inference_frame_queue_empty(ctx, s->base)) {
+    while (!ff_dnn_interface_frame_queue_empty(ctx, s->dnn_interface)) {
         AVFrame *output = NULL;
-        av_base_inference_get_frame(ctx, s->base, &output);
+        ff_dnn_interface_get_frame(ctx, s->dnn_interface, &output);
         if (output) {
             if (outlink) {
                 ret = ff_filter_frame(outlink, output);
@@ -159,7 +198,7 @@ static int flush_frame(AVFilterContext *ctx, AVFilterLink *outlink, int64_t pts,
             }
         }
 
-        av_base_inference_send_event(ctx, s->base, INFERENCE_EVENT_EOS);
+        ff_dnn_interface_send_event(ctx, s->dnn_interface, INFERENCE_EVENT_EOS);
         av_usleep(5000);
     }
 
@@ -167,11 +206,12 @@ static int flush_frame(AVFilterContext *ctx, AVFilterLink *outlink, int64_t pts,
     return ret;
 }
 
+#if 0
 static int load_balance(AVFilterContext *ctx)
 {
     AVFilterLink *inlink = ctx->inputs[0];
     AVFilterLink *outlink = ctx->outputs[0];
-    IEInferContext *s = ctx->priv;
+    DnnProcessing3Context *s = ctx->priv;
     AVFrame *in = NULL, *output = NULL;
     int64_t pts;
     int ret, status;
@@ -182,7 +222,7 @@ static int load_balance(AVFilterContext *ctx)
 
     // drain all processed frames
     do {
-        get_frame_status = av_base_inference_get_frame(ctx, s->base, &output);
+        get_frame_status = ff_dnn_interface_get_frame(ctx, s->base, &output);
         if (output) {
             int ret_val = ff_filter_frame(outlink, output);
             if (ret_val < 0)
@@ -197,7 +237,7 @@ static int load_balance(AVFilterContext *ctx)
     if (status)
         resource = ff_inlink_queued_frames(inlink);
     else
-        resource = av_base_inference_resource_status(ctx, s->base);
+        resource = ff_dnn_interface_resource_status(ctx, s->base);
 
     while (resource > 0) {
         ret = ff_inlink_consume_frame(inlink, &in);
@@ -206,7 +246,7 @@ static int load_balance(AVFilterContext *ctx)
         if (ret == 0)
             break;
         if (ret > 0) {
-            av_base_inference_send_frame(ctx, s->base, in);
+            ff_dnn_interface_send_frame(ctx, s->base, in);
         }
         resource--;
     }
@@ -229,19 +269,23 @@ static int load_balance(AVFilterContext *ctx)
 
     return FFERROR_NOT_READY;
 }
+#endif
 
 static int activate(AVFilterContext *ctx)
 {
     AVFilterLink *inlink = ctx->inputs[0];
     AVFilterLink *outlink = ctx->outputs[0];
-    IEInferContext *s = ctx->priv;
+    DnnProcessing3Context *s = ctx->priv;
     AVFrame *in = NULL, *output = NULL;
     int64_t pts;
     int ret, status;
     int got_frame = 0;
 
+    // TODO: add later
+#if 0
     if (av_load_balance_get())
         return load_balance(ctx);
+#endif
 
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
 
@@ -252,11 +296,11 @@ static int activate(AVFilterContext *ctx)
         if (ret < 0)
             return ret;
         if (ret > 0)
-            av_base_inference_send_frame(ctx, s->base, in);
+            ff_dnn_interface_send_frame(ctx, s->dnn_interface, in);
 
         // drain all processed frames
         do {
-            get_frame_status = av_base_inference_get_frame(ctx, s->base, &output);
+            get_frame_status = ff_dnn_interface_get_frame(ctx, s->dnn_interface, &output);
             if (output) {
                 int ret_val = ff_filter_frame(outlink, output);
                 if (ret_val < 0)
@@ -288,7 +332,8 @@ static int activate(AVFilterContext *ctx)
     return FFERROR_NOT_READY;
 }
 
-static const AVOption inference_infer_options[] = {
+#if 0
+static const AVOption dnn_processing3_options[] = {
     { "dnn_backend",  "DNN backend for model execution", OFFSET(backend_type),    AV_OPT_TYPE_FLAGS,  { .i64 = 1},          0, 2,  FLAGS },
     { "model",        "path to model file for network",  OFFSET(model),           AV_OPT_TYPE_STRING, { .str = NULL},       0, 0,  FLAGS },
     { "model_proc",   "model preproc and postproc",      OFFSET(model_proc),      AV_OPT_TYPE_STRING, { .str = NULL},       0, 0,  FLAGS },
@@ -302,19 +347,37 @@ static const AVOption inference_infer_options[] = {
 
     { NULL }
 };
+#endif
 
-AVFILTER_DEFINE_CLASS(inference_infer);
+static const AVOption dnn_processing3_options[] = {
+    { "dnn_backend", "DNN backend",                OFFSET(backend_type),     AV_OPT_TYPE_INT,       { .i64 = 0 },    INT_MIN, INT_MAX, FLAGS, "backend" },
+    { "native",      "native backend flag",        0,                        AV_OPT_TYPE_CONST,     { .i64 = 0 },    0, 0, FLAGS, "backend" },
+#if (CONFIG_LIBTENSORFLOW == 1)
+    { "tensorflow",  "tensorflow backend flag",    0,                        AV_OPT_TYPE_CONST,     { .i64 = 1 },    0, 0, FLAGS, "backend" },
+#endif
+#if (CONFIG_LIBOPENVINO == 1)
+    { "openvino",    "openvino backend flag",      0,                        AV_OPT_TYPE_CONST,     { .i64 = 2 },    0, 0, FLAGS, "backend" },
+#endif
+    { "model",       "path to model file",         OFFSET(model_filename),   AV_OPT_TYPE_STRING,    { .str = NULL }, 0, 0, FLAGS },
+    { "input",       "input name of the model",    OFFSET(model_inputname),  AV_OPT_TYPE_STRING,    { .str = NULL }, 0, 0, FLAGS },
+    { "output",      "output name of the model",   OFFSET(model_outputname), AV_OPT_TYPE_STRING,    { .str = NULL }, 0, 0, FLAGS },
+    { "batch_size",  "batch size per infer",       OFFSET(batch_size),       AV_OPT_TYPE_INT,       { .i64 = 1 },    1, 1000, FLAGS},
+    { NULL }
+};
 
-static const AVFilterPad infer_inputs[] = {
+
+AVFILTER_DEFINE_CLASS(dnn_processing3);
+
+static const AVFilterPad dnn_processing3_inputs[] = {
     {
         .name          = "default",
         .type          = AVMEDIA_TYPE_VIDEO,
-        .config_props  = config_input,
+        //.config_props  = config_input,  // don't care about hw frame for now. TODO: add later?
     },
     { NULL }
 };
 
-static const AVFilterPad infer_outputs[] = {
+static const AVFilterPad dnn_processing3_outputs[] = {
     {
         .name          = "default",
         .type          = AVMEDIA_TYPE_VIDEO,
@@ -322,16 +385,16 @@ static const AVFilterPad infer_outputs[] = {
     { NULL }
 };
 
-AVFilter ff_vf_inference_infer = {
-    .name          = "infer",
+AVFilter ff_vf_dnn_processing3 = {
+    .name          = "dnn_processing3",
     .description   = NULL_IF_CONFIG_SMALL("Gerneric Video Inference Filter."),
-    .priv_size     = sizeof(IEInferContext),
+    .priv_size     = sizeof(DnnProcessing3Context),
     .query_formats = query_formats,
     .activate      = activate,
-    .init          = infer_init,
-    .uninit        = infer_uninit,
-    .inputs        = infer_inputs,
-    .outputs       = infer_outputs,
-    .priv_class    = &inference_infer_class,
+    .init          = init,
+    .uninit        = uninit,
+    .inputs        = dnn_processing3_inputs,
+    .outputs       = dnn_processing3_outputs,
+    .priv_class    = &dnn_processing3_class,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };
