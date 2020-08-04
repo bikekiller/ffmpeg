@@ -116,12 +116,30 @@ DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
 }
 
 FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferenceParam *param, AVFilterContext *filter_ctx) {
+
     if (!param)
         return NULL;
 
     FFBaseInference *base_inference = (FFBaseInference *)av_mallocz(sizeof(*base_inference));
     if (base_inference == NULL)
         return NULL;
+
+    base_inference->dnn_module = ff_get_dnn_module(param->backend_type);
+    if (!base_inference->dnn_module) {
+        av_log(ctx, AV_LOG_ERROR, "could not create DNN module for requested backend\n");
+        goto err;
+    }
+
+    if (!base_inference->dnn_module->load_model) {
+        av_log(ctx, AV_LOG_ERROR, "load_model for network is not specified\n");
+        goto err;
+    }
+
+    base_inference->model = (base_inference->dnn_module->load_model)(base_inference->model_filename);
+    if (!base_inference->model) {
+        av_log(ctx, AV_LOG_ERROR, "could not load DNN model\n");
+        goto err;
+    }
 
     base_inference->filter_ctx = filter_ctx;
     base_inference->inference_id = inference_id ? av_strdup(inference_id) : NULL;
@@ -131,10 +149,13 @@ FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferencePa
     av_assert0(base_inference->processed_frames);
     pthread_mutex_init(&base_inference->processing_frames_mutex, NULL);
 
-    // TODO: create image inference backend and stuff for async inference
-    //base->inference = (void *)FFInferenceImplCreate(base);
-
     return base_inference;
+
+err:
+    av_freep(&base_inference->dnn_module);
+    av_free(base_inference);
+
+    return NULL;
 }
 
 void ff_dnn_interface_set_pre_proc(FFBaseInference *base, DNNPreProc pre_proc)
