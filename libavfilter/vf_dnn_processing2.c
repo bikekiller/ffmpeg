@@ -28,7 +28,9 @@
 #include "libavutil/pixdesc.h"
 #include "libavutil/avassert.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/time.h"
 #include "avfilter.h"
+#include "filters.h"
 #include "dnn_interface.h"
 #include "formats.h"
 #include "internal.h"
@@ -43,6 +45,12 @@ typedef struct DnnProcessing2Context {
     char *model_outputname;
     int  batch_size;
     FFBaseInference *dnn_interface;
+    int already_flushed;
+
+    // input & output of the model at execution time
+    DNNData input;
+    DNNData output;
+
     struct SwsContext *sws_resize;
     struct SwsContext *sws_gray8_to_grayf32;
     struct SwsContext *sws_grayf32_to_gray8;
@@ -122,16 +130,6 @@ static int copy_from_dnn_to_frame(DnnProcessing2Context *ctx, DNNData *dnn_outpu
 static int copy_from_frame_to_dnn(DnnProcessing2Context *ctx, const AVFrame *frame, DNNData *dnn_input)
 {
     int bytewidth = av_image_get_linesize(frame->format, frame->width, 0);
-
-    if ((dnn_input->width != frame->width || dnn_input->height != frame->height) && !ctx->resized_frame_allocated) {
-       // alloc frame with the same resolution with model input
-       uint8_t *planes[4];
-       int stride[4] = {}
-       av_image_alloc(planes, );
-    
-    
-    }
-    sws_scale(ctx->sws_resize, (const uint8_t **)frame->data, frame->linesize)
 
     switch (frame->format) {
     case AV_PIX_FMT_RGB24:
@@ -249,7 +247,10 @@ static int config_output(AVFilterLink *outlink)
     DNNReturnType result;
 
     // have a try run in case that the dnn model resize the frame
-    result = (ctx->dnn_interface->model->get_output)(ctx->dnn_interface->model, &ctx->output, ctx->model_outputname);
+    //result = (ctx->dnn_interface->model->get_output)(ctx->dnn_interface->model, &ctx->output, ctx->model_outputname);
+
+    // have a try run in case that the dnn model resize the frame
+    result = (ctx->dnn_interface->dnn_module->execute_model)(ctx->dnn_interface->model, &ctx->output, 1);
 
     if (result != DNN_SUCCESS){
         av_log(ctx, AV_LOG_ERROR, "failed to execute model\n");
@@ -271,7 +272,7 @@ static int pre_proc(AVFrame *frame_in, DNNData *model_input, FFBaseInference *ba
       return -1;
 
    DnnProcessing2Context *ctx = (DnnProcessing2Context *)base->filter_ctx->priv;
-_type   if (copy_from_frame_to_dnn(ctx, frame_in, model_input) != 0) {
+   if (copy_from_frame_to_dnn(ctx, frame_in, model_input) != 0) {
       av_log(ctx, AV_LOG_ERROR, "copy_from_frame_to_dnn failed\n");
       return -1;
    }
@@ -286,18 +287,19 @@ static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_o
       return -1; 
 
    AVFilterContext *filter_ctx = base->filter_ctx;
-   AVFilterLink *inlink = ctx->inputs[0];
-   AVFilterLink *outlink = ctx->outputs[0];
+   DnnProcessing2Context *ctx = filter_ctx->priv;
+   AVFilterLink *inlink = filter_ctx->inputs[0];
+   AVFilterLink *outlink = filter_ctx->outputs[0];
 
    AVFrame *frame_out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-   if (!output) {
+   if (!frame_out) {
       av_log(NULL, AV_LOG_ERROR, "can't get video buffer from outlink\n");
       return AVERROR(EINVAL);
    }
 
    av_frame_copy_props(frame_out, frame_in);
 
-   if (copy_from_dnn_to_frame(base, model_output, frame_out) != 0) {
+   if (copy_from_dnn_to_frame(ctx, model_output, frame_out) != 0) {
         av_log(NULL, AV_LOG_ERROR, "copy_from_dnn_to_frame failed\n");
         av_frame_free(&frame_out);
         return AVERROR(EINVAL);
@@ -341,6 +343,8 @@ static av_cold int init(AVFilterContext *context)
 
     ff_dnn_interface_set_pre_proc(s->dnn_interface, (DNNPreProc)pre_proc);
     ff_dnn_interface_set_post_proc(s->dnn_interface, (DNNPostProc)post_proc);
+
+    s->already_flushed = 0;
 
     return 0;
 }
@@ -525,7 +529,7 @@ static av_cold void uninit(AVFilterContext *ctx)
 static int config_input(AVFilterLink *inlink)
 {
     AVFilterContext *context     = inlink->dst;
-    DnnProcessingsContext *ctx = context->priv;
+    DnnProcessing2Context *ctx = context->priv;
     DNNReturnType result;
     DNNData model_input;
     int check;
@@ -541,21 +545,18 @@ static int config_input(AVFilterLink *inlink)
         return check;
     }
 
-    // FIXME: do we need this for sync mode?
-    /*
     ctx->input.width    = inlink->w;
     ctx->input.height   = inlink->h;
     ctx->input.channels = model_input.channels;
     ctx->input.dt = model_input.dt;
 
-    result = (ctx->model->set_input_output)(ctx->model->model,
+    result = (ctx->dnn_interface->model->set_input_output)(ctx->dnn_interface->model->model,
                                         &ctx->input, ctx->model_inputname,
                                         (const char **)&ctx->model_outputname, 1);
     if (result != DNN_SUCCESS) {
         av_log(ctx, AV_LOG_ERROR, "could not set input and output for the model\n");
         return AVERROR(EIO);
     }
-    */
 
     return 0;
 }

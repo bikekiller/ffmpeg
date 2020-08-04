@@ -130,6 +130,8 @@ struct __FFBaseInference {
     pthread_mutex_t output_frames_mutex;
     ff_list_t *processing_frames;    //
     ff_list_t *processed_frames; // TODO: consider remove it if all output frames can be consumed instantly
+
+    int async;
 };
 
 

@@ -24,9 +24,11 @@
  */
 
 #include "dnn_backend_openvino.h"
+#include "safe_queue.h"
 #include "libavformat/avio.h"
 #include "libavutil/avassert.h"
 #include <c_api/ie_c_api.h>
+#include <pthread.h>
 
 typedef struct RequestContext {
     int out_blob_id;
@@ -70,7 +72,7 @@ static DNNReturnType get_input_blob_ov(void *model, DNNData *input, const char *
     RequestContext *request_ctx = NULL;
     ie_infer_request_t *infer_request = NULL;
     ie_blob_t *input_blob = NULL;
-    EStatusCode status;
+    IEStatusCode status;
     dimensions_t dims;
     precision_e precision;
     ie_blob_buffer_t blob_buffer;
@@ -351,15 +353,17 @@ static void completion_callback(void *args) {
     RequestContext *request = (RequestContext *)args;
     uint32_t out_blob_id = request->out_blob_id;
     InferenceContext *inference_ctx = request->inference_ctx;
-    OutputFrame *output_frame = inference_ctx->output_frame;
-    FFBaseInterface *base = inference_ctx->base;
+    ProcessingFrame *processing_frame = inference_ctx->processing_frame;
+    FFBaseInference *base = inference_ctx->base;
     DNNModel *model = (DNNModel*)base->model;
     OVModel *ov_model = (OVModel*)model->model;
     dimensions_t dims;
+    precision_e precision;
     size_t num_outputs;
+    IEStatusCode status;
 
 
-    VAII_DEBUG(__FUNCTION__);
+    //VAII_DEBUG(__FUNCTION__);
 
     pthread_mutex_lock(&ov_model->callback_mutex);
 
@@ -396,16 +400,16 @@ static void completion_callback(void *args) {
         av_log(NULL, AV_LOG_ERROR, "failed to get precision\n");
     }
 
-    DNNData *output;
+    DNNData output;
     output.channels = dims.dims[1];
     output.height   = dims.dims[2];
     output.width    = dims.dims[3];
     output.dt       = precision_to_datatype(precision);
     output.data     = blob_buffer.buffer;
 
-    ((InferCallback)inference_ctx->cb)(output, base);
+    ((InferCallback)inference_ctx->cb)(&output, processing_frame, base);
 
-    SafeQueuePush(ov_model->freeRequests, request);
+    SafeQueuePush(ov_model->request_ctx_q, request);
 
 out:
     if (out_blob)
@@ -413,11 +417,10 @@ out:
 
     pthread_mutex_unlock(&ov_model->callback_mutex);
 
-    VAII_DEBUG("EXIT");
+    //VAII_DEBUG("EXIT");
 }
 
-
-DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, InferenceContext *inference_ctx, int out_blob_id);
+DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, InferenceContext *inference_ctx, int out_blob_id)
 {
     OVModel *ov_model = (OVModel *)model->model;
     RequestContext *request_ctx = (RequestContext *)SafeQueuePop(ov_model->request_ctx_q);

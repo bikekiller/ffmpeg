@@ -112,6 +112,8 @@ FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferencePa
     av_assert0(base_inference->processed_frames);
     pthread_mutex_init(&base_inference->output_frames_mutex, NULL);
 
+    base_inference->async = 0; // FIXME: temp for debug
+
     return base_inference;
 
 err:
@@ -210,7 +212,7 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
 
     // preproc
     DNNData input_blob;
-    int ret = (base->model->get_input_blob)(base->model, &input_blob, base->param.model_inputname);
+    int ret = (base->model->get_input_blob)(base->model->model, &input_blob, base->param.model_inputname);
 
     if(!base->pre_proc) {
         av_log(NULL, AV_LOG_ERROR, "pre_proc function not specified\n");
@@ -220,7 +222,7 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
     ((DNNPreProc)(base->pre_proc))(frame_in, &input_blob, base);
 
     // inference
-    if (base->dnn_module->execute_model_async) {
+    if (base->dnn_module->execute_model_async && base->async) {
 
        // push into processing_frames queue
        pthread_mutex_lock(&base->output_frames_mutex);
@@ -253,7 +255,7 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
     }
 
     // post proc for sync inference
-    if (!base->dnn_module->execute_model_async) {
+    if (!base->dnn_module->execute_model_async || !base->async) {
 
        AVFrame *frame_out = NULL;
        if (((DNNPostProc)base->post_proc)(&base->output, frame_in, &frame_out, base) != 0) {
@@ -283,8 +285,14 @@ int ff_dnn_interface_frame_queue_empty(FFBaseInference *base) {
     if (!base)
         return AVERROR(EINVAL);
 
-    ff_list_t *out = base->processing_frames;
     ff_list_t *pro = base->processed_frames;
-    av_log(NULL, AV_LOG_INFO, "output:%zu processed:%zu\n", out->size(out), pro->size(pro));
-    return out->size(out) + pro->size(pro);
+
+    if (base->dnn_module->execute_model_async && base->async) {
+       ff_list_t *out = base->processing_frames;
+       av_log(NULL, AV_LOG_INFO, "output:%zu processed:%zu\n", out->size(out), pro->size(pro));
+       return out->size(out) + pro->size(pro);
+    } else {
+       av_log(NULL, AV_LOG_INFO, "processed:%zu\n", pro->size(pro));
+       return pro->size(pro);
+    }
 }

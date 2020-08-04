@@ -9,7 +9,7 @@ OBJS-$(CONFIG_DNN)                           += dnn/dnn_backend_native_layer_max
 OBJS-$(CONFIG_DNN)                           += dnn/dnn_backend_native_layer_mathbinary.o
 OBJS-$(CONFIG_DNN)                           += dnn/dnn_backend_native_layer_mathunary.o
 OBJS-$(CONFIG_DNN)                           += dnn/ff_list.o
-OBJS-$(CONFIG_DNN)                           += dnn/queue.o
+OBJS-$(CONFIG_DNN)                           += dnn/safe_queue.o
 
 DNN-OBJS-$(CONFIG_LIBTENSORFLOW)             += dnn/dnn_backend_tf.o
 DNN-OBJS-$(CONFIG_LIBOPENVINO)               += dnn/dnn_backend_openvino.o
