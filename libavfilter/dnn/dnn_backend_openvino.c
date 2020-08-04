@@ -28,6 +28,13 @@
 #include "libavutil/avassert.h"
 #include <c_api/ie_c_api.h>
 
+typedef struct RequestContext {
+    int out_blob_id;
+    ie_infer_request_t *infer_request;
+    ie_complete_call_back_t callback;
+    InferenceContext *inference_ctx;
+} RequestContext;
+
 typedef struct OVModel{
     ie_core_t *core;
     ie_network_t *network;
@@ -36,6 +43,13 @@ typedef struct OVModel{
     ie_blob_t *input_blob;
     ie_blob_t **output_blobs;
     uint32_t nb_output;
+
+    // async support
+    int num_reqs;
+    SafeQueueT *request_ctx_q; // queue to hold request context
+    ie_infer_request_t **infer_requests;
+    pthread_mutex_t callback_mutex;
+
 } OVModel;
 
 static DNNDataType precision_to_datatype(precision_e precision)
@@ -48,6 +62,92 @@ static DNNDataType precision_to_datatype(precision_e precision)
         av_assert0(!"not supported yet.");
         return DNN_FLOAT;
     }
+}
+
+static DNNReturnType get_input_blob_ov(void *model, DNNData *input, const char *input_name)
+{
+    OVModel *ov_model = (OVModel *)model;
+    RequestContext *request_ctx = NULL;
+    ie_infer_request_t *infer_request = NULL;
+    ie_blob_t *input_blob = NULL;
+    EStatusCode status;
+    dimensions_t dims;
+    precision_e precision;
+    ie_blob_buffer_t blob_buffer;
+
+    request_ctx = (RequestContext *)SafeQueuePop(ov_model->request_ctx_q);
+    infer_request = request_ctx->infer_request;
+
+    status = ie_infer_request_get_blob(infer_request, input_name, &input_blob);
+    if (status != OK)
+       goto err;
+
+    status |= ie_blob_get_dims(input_blob, &dims);
+    status |= ie_blob_get_precision(input_blob, &precision);
+    if (status != OK)
+       goto err;
+
+    input->channels = dims.dims[1];
+    input->height   = dims.dims[2];
+    input->width    = dims.dims[3];
+    input->dt       = precision_to_datatype(precision);
+
+    status = ie_blob_get_buffer(input_blob, &blob_buffer);
+    if (status != OK)
+       goto err;
+    input->data = blob_buffer.buffer;
+    SafeQueuePushFront(ov_model->request_ctx_q, request_ctx);
+    return DNN_SUCCESS;
+
+err:
+    SafeQueuePushFront(ov_model->request_ctx_q, request_ctx);
+    if (input_blob)
+        ie_blob_free(&input_blob);
+    if (infer_request)
+        ie_infer_request_free(&infer_request);
+    return DNN_ERROR;
+}
+
+static DNNReturnType get_output_ov(void *model, DNNData *output, const char *output_name)
+{
+   DNNReturnType ret = DNN_SUCCESS;
+   OVModel *ov_model = (OVModel *)model;
+   ie_blob_t *output_blob = NULL;
+   ie_blob_buffer_t blob_buffer;
+   dimensions_t dims;
+   precision_e precision;
+
+   IEStatusCode status = ie_infer_request_infer(ov_model->infer_request);
+   if (status != OK)
+      return DNN_ERROR;
+
+   status = ie_infer_request_get_blob(ov_model->infer_request, output_name, &output_blob);
+   if (status != OK) {
+      return DNN_ERROR;
+   }
+
+   status = ie_blob_get_buffer(output_blob, &blob_buffer);
+   if (status != OK) {
+      ret = DNN_ERROR;
+      goto out;
+   }
+
+   status |= ie_blob_get_dims(output_blob, &dims);
+   status |= ie_blob_get_precision(output_blob, &precision);
+   if (status != OK) {
+      ret = DNN_ERROR;
+      goto out;
+   }
+
+   output->channels = dims.dims[1];
+   output->height   = dims.dims[2];
+   output->width    = dims.dims[3];
+   output->dt       = precision_to_datatype(precision);
+   output->data     = blob_buffer.buffer;
+
+out:
+   ie_blob_free(&output_blob);
+   return ret;
 }
 
 static DNNReturnType get_input_ov(void *model, DNNData *input, const char *input_name)
@@ -183,10 +283,42 @@ DNNModel *ff_dnn_load_model_ov(const char *model_filename, const char *options)
     if (status != OK)
         goto err;
 
+
+    int nireq = 8; // TODO: pass in as parameter
+    ov_model->infer_requests = (ie_infer_request_t **)malloc(nireq * sizeof(ie_infer_request_t *));
+    if (!ov_model->infer_requests) {
+        goto err;
+    }
+    ov_model->num_reqs = nireq;
+    for (size_t i = 0; i < ov_model->num_reqs; ++i) {
+        ie_exec_network_create_infer_request(ov_model->exe_network, &ov_model->infer_requests[i]);
+        if (!ov_model->infer_requests[i]) {
+            goto err;
+        }
+    }
+
+    ov_model->request_ctx_q = SafeQueueCreate();
+    if (!ov_model->request_ctx_q) {
+        goto err;
+    }
+
+    for (size_t n = 0; n < ov_model->num_reqs; ++n) {
+        RequestContext *request_ctx = (RequestContext *)malloc(sizeof(*request_ctx));
+        if (!request_ctx)
+            goto err;
+        memset(request_ctx, 0, sizeof(*request_ctx));
+        request_ctx->infer_request = ov_model->infer_requests[n];
+        SafeQueuePush(ov_model->request_ctx_q, request_ctx);
+    }
+
+    pthread_mutex_init(&ov_model->callback_mutex, NULL);
+
     model->model = (void *)ov_model;
+    model->options = options;
     model->set_input_output = &set_input_output_ov;
     model->get_input = &get_input_ov;
-    model->options = options;
+    model->get_output = &get_output_ov;
+    model->get_input_blob = &get_input_blob_ov;
 
     return model;
 
@@ -194,6 +326,15 @@ err:
     if (model)
         av_freep(&model);
     if (ov_model) {
+        if (ov_model->infer_requests) {
+           for (size_t i = 0; i < ov_model->num_reqs; ++i)
+              if (ov_model->infer_requests[i])
+                 ie_infer_request_free(&ov_model->infer_requests[i]);
+           free(ov_model->infer_requests);
+           ov_model->num_reqs = 0;
+        }
+        if (ov_model->request_ctx_q)
+           SafeQueueDestroy(ov_model->request_ctx_q);
         if (ov_model->exe_network)
             ie_exec_network_free(&ov_model->exe_network);
         if (ov_model->network)
@@ -203,6 +344,93 @@ err:
         av_freep(&ov_model);
     }
     return NULL;
+}
+
+static void completion_callback(void *args) {
+
+    RequestContext *request = (RequestContext *)args;
+    uint32_t out_blob_id = request->out_blob_id;
+    InferenceContext *inference_ctx = request->inference_ctx;
+    OutputFrame *output_frame = inference_ctx->output_frame;
+    FFBaseInterface *base = inference_ctx->base;
+    DNNModel *model = (DNNModel*)base->model;
+    OVModel *ov_model = (OVModel*)model->model;
+    dimensions_t dims;
+    size_t num_outputs;
+
+
+    VAII_DEBUG(__FUNCTION__);
+
+    pthread_mutex_lock(&ov_model->callback_mutex);
+
+    // output blob to DNNData 
+    ie_network_get_outputs_number(ov_model->network, &num_outputs);
+
+    ie_blob_t *out_blob = NULL;
+    for (size_t i = 0; i < num_outputs; i++) {
+        if (i != out_blob_id) 
+           continue;
+
+        char *output_name = NULL;
+        ie_network_get_output_name(ov_model->network, i, &output_name);
+        ie_infer_request_get_blob(request->infer_request, output_name, &out_blob);
+        free(output_name);
+        break;
+    }
+
+    if (!out_blob) {
+       av_log(NULL, AV_LOG_ERROR, "failed to get out blob\n");
+       goto out;
+    }
+
+    ie_blob_buffer_t blob_buffer;
+    status = ie_blob_get_buffer(out_blob, &blob_buffer);
+    if (status != OK) {
+        av_log(NULL, AV_LOG_ERROR, "failed to get buffer\n");
+        goto out;
+    }
+
+    status |= ie_blob_get_dims(out_blob, &dims);
+    status |= ie_blob_get_precision(out_blob, &precision);
+    if (status != OK) {
+        av_log(NULL, AV_LOG_ERROR, "failed to get precision\n");
+    }
+
+    DNNData *output;
+    output.channels = dims.dims[1];
+    output.height   = dims.dims[2];
+    output.width    = dims.dims[3];
+    output.dt       = precision_to_datatype(precision);
+    output.data     = blob_buffer.buffer;
+
+    ((InferCallback)inference_ctx->cb)(output, base);
+
+    SafeQueuePush(ov_model->freeRequests, request);
+
+out:
+    if (out_blob)
+        ie_blob_free(&out_blob);
+
+    pthread_mutex_unlock(&ov_model->callback_mutex);
+
+    VAII_DEBUG("EXIT");
+}
+
+
+DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, InferenceContext *inference_ctx, int out_blob_id);
+{
+    OVModel *ov_model = (OVModel *)model->model;
+    RequestContext *request_ctx = (RequestContext *)SafeQueuePop(ov_model->request_ctx_q);
+
+    request_ctx->callback.completeCallBackFunc = completion_callback;
+    request_ctx->callback.args = request_ctx;
+    request_ctx->inference_ctx = inference_ctx;
+    request_ctx->out_blob_id = out_blob_id;
+
+    ie_infer_set_completion_callback(request_ctx->infer_request, &request_ctx->callback);
+    ie_infer_request_infer_async(request_ctx->infer_request);
+
+    return DNN_SUCCESS;
 }
 
 DNNReturnType ff_dnn_execute_model_ov(const DNNModel *model, DNNData *outputs, uint32_t nb_output)
@@ -246,10 +474,21 @@ void ff_dnn_free_model_ov(DNNModel **model)
             }
             av_freep(&ov_model->output_blobs);
         }
+
         if (ov_model->input_blob)
             ie_blob_free(&ov_model->input_blob);
         if (ov_model->infer_request)
             ie_infer_request_free(&ov_model->infer_request);
+        if (ov_model->infer_requests) {
+           for (size_t i = 0; i < ov_model->num_reqs; ++i)
+              if (ov_model->infer_requests[i])
+                 ie_infer_request_free(&ov_model->infer_requests[i]);
+           free(ov_model->infer_requests);
+           ov_model->num_reqs = 0;
+        }
+        if (ov_model->request_ctx_q)
+           SafeQueueDestroy(ov_model->request_ctx_q);
+        pthread_mutex_destroy(&ov_model->callback_mutex);
         if (ov_model->exe_network)
             ie_exec_network_free(&ov_model->exe_network);
         if (ov_model->network)

@@ -43,7 +43,11 @@ typedef struct DnnProcessing2Context {
     char *model_outputname;
     int  batch_size;
     FFBaseInference *dnn_interface;
-
+    struct SwsContext *sws_resize;
+    struct SwsContext *sws_gray8_to_grayf32;
+    struct SwsContext *sws_grayf32_to_gray8;
+    struct SwsContext *sws_uv_scale;
+    int sws_uv_height;
 } DnnProcessing2Context;
 
 #define OFFSET(x) offsetof(DnnProcessing2Context, x)
@@ -66,169 +70,99 @@ static const AVOption dnn_processing2_options[] = {
 
 AVFILTER_DEFINE_CLASS(dnn_processing2);
 
-static av_cold int init(AVFilterContext *context)
+static int copy_from_dnn_to_frame(DnnProcessing2Context *ctx, DNNData *dnn_output, AVFrame *frame)
 {
-    DnnProcessing2Context *ctx = context->priv;
+    int bytewidth = av_image_get_linesize(frame->format, frame->width, 0);
 
-    if (!ctx->model_filename) {
-        av_log(ctx, AV_LOG_ERROR, "model file for network is not specified\n");
-        return AVERROR(EINVAL);
-    }
-    if (!ctx->model_inputname) {
-        av_log(ctx, AV_LOG_ERROR, "input name of the model network is not specified\n");
-        return AVERROR(EINVAL);
-    }
-    if (!ctx->model_outputname) {
-        av_log(ctx, AV_LOG_ERROR, "output name of the model network is not specified\n");
-        return AVERROR(EINVAL);
-    }
-
-    FFInferenceParam param = { };
-
-    param.model           = ctx->model_filename;
-    param.model_inputname = ctx->model_inputname;
-    param.model_outputname = ctx->model_outputname;
-    param.batch_size      = ctx->batch_size;
-    param.backend         = DNN_OV; // FIXME: temp for testing
-
-    ctx->dnn_interface = ff_dnn_interface_create(ctx->filter->name, &param);
-    if (!ctx->dnn_interface) {
-        av_log(ctx, AV_LOG_ERROR, "Could not create inference.\n");
-        return AVERROR(EINVAL);
-    }
-
-    /*
-    ctx->dnn_module = ff_get_dnn_module(ctx->backend_type);
-    if (!ctx->dnn_module) {
-        av_log(ctx, AV_LOG_ERROR, "could not create DNN module for requested backend\n");
-        return AVERROR(ENOMEM);
-    }
-    if (!ctx->dnn_module->load_model) {
-        av_log(ctx, AV_LOG_ERROR, "load_model for network is not specified\n");
-        return AVERROR(EINVAL);
-    }
-
-    ctx->model = (ctx->dnn_module->load_model)(ctx->model_filename);
-    if (!ctx->model) {
-        av_log(ctx, AV_LOG_ERROR, "could not load DNN model\n");
-        return AVERROR(EINVAL);
-    }
-    */
-
-    return 0;
-}
-
-static int query_formats(AVFilterContext *context)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_RGB24, AV_PIX_FMT_BGR24,
-        AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAYF32,
-        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
-        AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
-        AV_PIX_FMT_NONE
-    };
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    return ff_set_common_formats(context, fmts_list);
-}
-
-#define LOG_FORMAT_CHANNEL_MISMATCH()                       \
-    av_log(ctx, AV_LOG_ERROR,                               \
-           "the frame's format %s does not match "          \
-           "the model input channel %d\n",                  \
-           av_get_pix_fmt_name(fmt),                        \
-           model_input->channels);
-
-static int check_modelinput_inlink(const DNNData *model_input, const AVFilterLink *inlink)
-{
-    AVFilterContext *ctx   = inlink->dst;
-    enum AVPixelFormat fmt = inlink->format;
-
-    // the design is to add explicit scale filter before this filter
-    if (model_input->height != -1 && model_input->height != inlink->h) {
-        av_log(ctx, AV_LOG_ERROR, "the model requires frame height %d but got %d\n",
-                                   model_input->height, inlink->h);
-        return AVERROR(EIO);
-    }
-    if (model_input->width != -1 && model_input->width != inlink->w) {
-        av_log(ctx, AV_LOG_ERROR, "the model requires frame width %d but got %d\n",
-                                   model_input->width, inlink->w);
-        return AVERROR(EIO);
-    }
-
-    switch (fmt) {
+    switch (frame->format) {
     case AV_PIX_FMT_RGB24:
     case AV_PIX_FMT_BGR24:
-        if (model_input->channels != 3) {
-            LOG_FORMAT_CHANNEL_MISMATCH();
-            return AVERROR(EIO);
-        }
-        if (model_input->dt != DNN_FLOAT && model_input->dt != DNN_UINT8) {
-            av_log(ctx, AV_LOG_ERROR, "only support dnn models with input data type as float32 and uint8.\n");
-            return AVERROR(EIO);
+        if (dnn_output->dt == DNN_FLOAT) {
+            sws_scale(ctx->sws_grayf32_to_gray8, (const uint8_t *[4]){(const uint8_t *)dnn_output->data, 0, 0, 0},
+                      (const int[4]){frame->width * 3 * sizeof(float), 0, 0, 0},
+                      0, frame->height, (uint8_t * const*)frame->data, frame->linesize);
+
+        } else {
+            av_assert0(dnn_output->dt == DNN_UINT8);
+            av_image_copy_plane(frame->data[0], frame->linesize[0],
+                                dnn_output->data, bytewidth,
+                                bytewidth, frame->height);
         }
         return 0;
     case AV_PIX_FMT_GRAY8:
-        if (model_input->channels != 1) {
-            LOG_FORMAT_CHANNEL_MISMATCH();
-            return AVERROR(EIO);
-        }
-        if (model_input->dt != DNN_UINT8) {
-            av_log(ctx, AV_LOG_ERROR, "only support dnn models with input data type uint8.\n");
-            return AVERROR(EIO);
-        }
+        // it is possible that data type of dnn output is float32,
+        // need to add support for such case when needed.
+        av_assert0(dnn_output->dt == DNN_UINT8);
+        av_image_copy_plane(frame->data[0], frame->linesize[0],
+                            dnn_output->data, bytewidth,
+                            bytewidth, frame->height);
         return 0;
     case AV_PIX_FMT_GRAYF32:
+        av_assert0(dnn_output->dt == DNN_FLOAT);
+        av_image_copy_plane(frame->data[0], frame->linesize[0],
+                            dnn_output->data, bytewidth,
+                            bytewidth, frame->height);
+        return 0;
     case AV_PIX_FMT_YUV420P:
     case AV_PIX_FMT_YUV422P:
     case AV_PIX_FMT_YUV444P:
     case AV_PIX_FMT_YUV410P:
     case AV_PIX_FMT_YUV411P:
-        if (model_input->channels != 1) {
-            LOG_FORMAT_CHANNEL_MISMATCH();
-            return AVERROR(EIO);
-        }
-        if (model_input->dt != DNN_FLOAT) {
-            av_log(ctx, AV_LOG_ERROR, "only support dnn models with input data type float32.\n");
-            return AVERROR(EIO);
-        }
+        sws_scale(ctx->sws_grayf32_to_gray8, (const uint8_t *[4]){(const uint8_t *)dnn_output->data, 0, 0, 0},
+                  (const int[4]){frame->width * sizeof(float), 0, 0, 0},
+                  0, frame->height, (uint8_t * const*)frame->data, frame->linesize);
         return 0;
     default:
-        av_log(ctx, AV_LOG_ERROR, "%s not supported.\n", av_get_pix_fmt_name(fmt));
         return AVERROR(EIO);
     }
 
     return 0;
 }
 
-static int config_input(AVFilterLink *inlink)
+static int copy_from_frame_to_dnn(DnnProcessing2Context *ctx, const AVFrame *frame, DNNData *dnn_input)
 {
-    AVFilterContext *context     = inlink->dst;
-    DnnProcessing2Context *ctx = context->priv;
-    DNNReturnType result;
-    DNNData model_input;
-    int check;
+    int bytewidth = av_image_get_linesize(frame->format, frame->width, 0);
 
-    result = ctx->model->get_input(ctx->model->model, &model_input, ctx->model_inputname);
-    if (result != DNN_SUCCESS) {
-        av_log(ctx, AV_LOG_ERROR, "could not get input from the model\n");
-        return AVERROR(EIO);
+    if ((dnn_input->width != frame->width || dnn_input->height != frame->height) && !ctx->resized_frame_allocated) {
+       // alloc frame with the same resolution with model input
+       uint8_t *planes[4];
+       int stride[4] = {}
+       av_image_alloc(planes, );
+    
+    
     }
+    sws_scale(ctx->sws_resize, (const uint8_t **)frame->data, frame->linesize)
 
-    check = check_modelinput_inlink(&model_input, inlink);
-    if (check != 0) {
-        return check;
-    }
-
-    ctx->input.width    = inlink->w;
-    ctx->input.height   = inlink->h;
-    ctx->input.channels = model_input.channels;
-    ctx->input.dt = model_input.dt;
-
-    result = (ctx->model->set_input_output)(ctx->model->model,
-                                        &ctx->input, ctx->model_inputname,
-                                        (const char **)&ctx->model_outputname, 1);
-    if (result != DNN_SUCCESS) {
-        av_log(ctx, AV_LOG_ERROR, "could not set input and output for the model\n");
+    switch (frame->format) {
+    case AV_PIX_FMT_RGB24:
+    case AV_PIX_FMT_BGR24:
+        if (dnn_input->dt == DNN_FLOAT) {
+            sws_scale(ctx->sws_gray8_to_grayf32, (const uint8_t **)frame->data, frame->linesize,
+                      0, frame->height, (uint8_t * const*)(&dnn_input->data),
+                      (const int [4]){frame->width * 3 * sizeof(float), 0, 0, 0});
+        } else {
+            av_assert0(dnn_input->dt == DNN_UINT8);
+            av_image_copy_plane(dnn_input->data, bytewidth,
+                                frame->data[0], frame->linesize[0],
+                                bytewidth, frame->height);
+        }
+        return 0;
+    case AV_PIX_FMT_GRAY8:
+    case AV_PIX_FMT_GRAYF32:
+        av_image_copy_plane(dnn_input->data, bytewidth,
+                            frame->data[0], frame->linesize[0],
+                            bytewidth, frame->height);
+        return 0;
+    case AV_PIX_FMT_YUV420P:
+    case AV_PIX_FMT_YUV422P:
+    case AV_PIX_FMT_YUV444P:
+    case AV_PIX_FMT_YUV410P:
+    case AV_PIX_FMT_YUV411P:
+        sws_scale(ctx->sws_gray8_to_grayf32, (const uint8_t **)frame->data, frame->linesize,
+                  0, frame->height, (uint8_t * const*)(&dnn_input->data),
+                  (const int [4]){frame->width * sizeof(float), 0, 0, 0});
+        return 0;
+    default:
         return AVERROR(EIO);
     }
 
@@ -315,7 +249,8 @@ static int config_output(AVFilterLink *outlink)
     DNNReturnType result;
 
     // have a try run in case that the dnn model resize the frame
-    result = (ctx->dnn_module->execute_model)(ctx->model, &ctx->output, 1);
+    result = (ctx->dnn_interface->model->get_output)(ctx->dnn_interface->model, &ctx->output, ctx->model_outputname);
+
     if (result != DNN_SUCCESS){
         av_log(ctx, AV_LOG_ERROR, "failed to execute model\n");
         return AVERROR(EIO);
@@ -329,124 +264,164 @@ static int config_output(AVFilterLink *outlink)
     return 0;
 }
 
-static int copy_from_frame_to_dnn(DnnProcessing2Context *ctx, const AVFrame *frame)
+// AVFrame to model input
+static int pre_proc(AVFrame *frame_in, DNNData *model_input, FFBaseInference *base)
 {
-    int bytewidth = av_image_get_linesize(frame->format, frame->width, 0);
-    DNNData *dnn_input = &ctx->input;
+   if (!frame_in || !base)
+      return -1;
 
-    switch (frame->format) {
+   DnnProcessing2Context *ctx = (DnnProcessing2Context *)base->filter_ctx->priv;
+   if (copy_from_frame_to_dnn(ctx, frame_in, model_input) != 0) {
+      av_log(ctx, AV_LOG_ERROR, "copy_from_frame_to_dnn failed\n");
+      return -1;
+   }
+
+   return 0;
+}
+
+// model output to AVFrame
+static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, FFBaseInference *base)
+{
+   if (!model_output || !frame_in || !frame_out_p || !base)
+      return -1; 
+
+   AVFilterContext *filter_ctx = base->filter_ctx;
+   AVFilterLink *inlink = ctx->inputs[0];
+   AVFilterLink *outlink = ctx->outputs[0];
+
+   AVFrame *frame_out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
+   if (!output) {
+      av_log(NULL, AV_LOG_ERROR, "can't get video buffer from outlink\n");
+      return AVERROR(EINVAL);
+   }
+
+   av_frame_copy_props(frame_out, frame_in);
+
+   if (copy_from_dnn_to_frame(base, model_output, frame_out) != 0) {
+        av_log(NULL, AV_LOG_ERROR, "copy_from_dnn_to_frame failed\n");
+        av_frame_free(&frame_out);
+        return AVERROR(EINVAL);
+   }
+
+   *frame_out_p = frame_out;
+
+   return 0;
+}
+
+static av_cold int init(AVFilterContext *context)
+{
+    DnnProcessing2Context *s = context->priv;
+
+    if (!s->model_filename) {
+        av_log(s, AV_LOG_ERROR, "model file for network is not specified\n");
+        return AVERROR(EINVAL);
+    }
+    if (!s->model_inputname) {
+        av_log(s, AV_LOG_ERROR, "input name of the model network is not specified\n");
+        return AVERROR(EINVAL);
+    }
+    if (!s->model_outputname) {
+        av_log(s, AV_LOG_ERROR, "output name of the model network is not specified\n");
+        return AVERROR(EINVAL);
+    }
+
+    FFInferenceParam param = { };
+
+    param.model           = s->model_filename;
+    param.model_inputname = s->model_inputname;
+    param.model_outputname = s->model_outputname;
+    param.batch_size      = s->batch_size;
+    param.backend         = DNN_OV; // FIXME: temp for testing
+
+    s->dnn_interface = ff_dnn_interface_create(context->filter->name, &param, context);
+    if (!s->dnn_interface) {
+        av_log(s, AV_LOG_ERROR, "Could not create inference.\n");
+        return AVERROR(EINVAL);
+    }
+
+    ff_dnn_interface_set_pre_proc(s->dnn_interface, (DNNPreProc)pre_proc);
+    ff_dnn_interface_set_post_proc(s->dnn_interface, (DNNPostProc)post_proc);
+
+    return 0;
+}
+
+static int query_formats(AVFilterContext *context)
+{
+    static const enum AVPixelFormat pix_fmts[] = {
+        AV_PIX_FMT_RGB24, AV_PIX_FMT_BGR24,
+        AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAYF32,
+        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
+        AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
+        AV_PIX_FMT_NONE
+    };
+    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
+    return ff_set_common_formats(context, fmts_list);
+}
+
+#define LOG_FORMAT_CHANNEL_MISMATCH()                       \
+    av_log(ctx, AV_LOG_ERROR,                               \
+           "the frame's format %s does not match "          \
+           "the model input channel %d\n",                  \
+           av_get_pix_fmt_name(fmt),                        \
+           model_input->channels);
+
+static int check_modelinput_inlink(const DNNData *model_input, const AVFilterLink *inlink)
+{
+    AVFilterContext *ctx   = inlink->dst;
+    enum AVPixelFormat fmt = inlink->format;
+
+    // the design is to add explicit scale filter before this filter
+    if (model_input->height != -1 && model_input->height != inlink->h) {
+        av_log(ctx, AV_LOG_ERROR, "the model requires frame height %d but got %d\n",
+                                   model_input->height, inlink->h);
+        return AVERROR(EIO);
+    }
+    if (model_input->width != -1 && model_input->width != inlink->w) {
+        av_log(ctx, AV_LOG_ERROR, "the model requires frame width %d but got %d\n",
+                                   model_input->width, inlink->w);
+        return AVERROR(EIO);
+    }
+
+    switch (fmt) {
     case AV_PIX_FMT_RGB24:
     case AV_PIX_FMT_BGR24:
-        if (dnn_input->dt == DNN_FLOAT) {
-            sws_scale(ctx->sws_gray8_to_grayf32, (const uint8_t **)frame->data, frame->linesize,
-                      0, frame->height, (uint8_t * const*)(&dnn_input->data),
-                      (const int [4]){frame->width * 3 * sizeof(float), 0, 0, 0});
-        } else {
-            av_assert0(dnn_input->dt == DNN_UINT8);
-            av_image_copy_plane(dnn_input->data, bytewidth,
-                                frame->data[0], frame->linesize[0],
-                                bytewidth, frame->height);
+        if (model_input->channels != 3) {
+            LOG_FORMAT_CHANNEL_MISMATCH();
+            return AVERROR(EIO);
+        }
+        if (model_input->dt != DNN_FLOAT && model_input->dt != DNN_UINT8) {
+            av_log(ctx, AV_LOG_ERROR, "only support dnn models with input data type as float32 and uint8.\n");
+            return AVERROR(EIO);
         }
         return 0;
     case AV_PIX_FMT_GRAY8:
-    case AV_PIX_FMT_GRAYF32:
-        av_image_copy_plane(dnn_input->data, bytewidth,
-                            frame->data[0], frame->linesize[0],
-                            bytewidth, frame->height);
+        if (model_input->channels != 1) {
+            LOG_FORMAT_CHANNEL_MISMATCH();
+            return AVERROR(EIO);
+        }
+        if (model_input->dt != DNN_UINT8) {
+            av_log(ctx, AV_LOG_ERROR, "only support dnn models with input data type uint8.\n");
+            return AVERROR(EIO);
+        }
         return 0;
+    case AV_PIX_FMT_GRAYF32:
     case AV_PIX_FMT_YUV420P:
     case AV_PIX_FMT_YUV422P:
     case AV_PIX_FMT_YUV444P:
     case AV_PIX_FMT_YUV410P:
     case AV_PIX_FMT_YUV411P:
-        sws_scale(ctx->sws_gray8_to_grayf32, (const uint8_t **)frame->data, frame->linesize,
-                  0, frame->height, (uint8_t * const*)(&dnn_input->data),
-                  (const int [4]){frame->width * sizeof(float), 0, 0, 0});
-        return 0;
-    default:
-        return AVERROR(EIO);
-    }
-
-    return 0;
-}
-
-static int copy_from_dnn_to_frame(DnnProcessing2Context *ctx, AVFrame *frame)
-{
-    int bytewidth = av_image_get_linesize(frame->format, frame->width, 0);
-    DNNData *dnn_output = &ctx->output;
-
-    switch (frame->format) {
-    case AV_PIX_FMT_RGB24:
-    case AV_PIX_FMT_BGR24:
-        if (dnn_output->dt == DNN_FLOAT) {
-            sws_scale(ctx->sws_grayf32_to_gray8, (const uint8_t *[4]){(const uint8_t *)dnn_output->data, 0, 0, 0},
-                      (const int[4]){frame->width * 3 * sizeof(float), 0, 0, 0},
-                      0, frame->height, (uint8_t * const*)frame->data, frame->linesize);
-
-        } else {
-            av_assert0(dnn_output->dt == DNN_UINT8);
-            av_image_copy_plane(frame->data[0], frame->linesize[0],
-                                dnn_output->data, bytewidth,
-                                bytewidth, frame->height);
+        if (model_input->channels != 1) {
+            LOG_FORMAT_CHANNEL_MISMATCH();
+            return AVERROR(EIO);
+        }
+        if (model_input->dt != DNN_FLOAT) {
+            av_log(ctx, AV_LOG_ERROR, "only support dnn models with input data type float32.\n");
+            return AVERROR(EIO);
         }
         return 0;
-    case AV_PIX_FMT_GRAY8:
-        // it is possible that data type of dnn output is float32,
-        // need to add support for such case when needed.
-        av_assert0(dnn_output->dt == DNN_UINT8);
-        av_image_copy_plane(frame->data[0], frame->linesize[0],
-                            dnn_output->data, bytewidth,
-                            bytewidth, frame->height);
-        return 0;
-    case AV_PIX_FMT_GRAYF32:
-        av_assert0(dnn_output->dt == DNN_FLOAT);
-        av_image_copy_plane(frame->data[0], frame->linesize[0],
-                            dnn_output->data, bytewidth,
-                            bytewidth, frame->height);
-        return 0;
-    case AV_PIX_FMT_YUV420P:
-    case AV_PIX_FMT_YUV422P:
-    case AV_PIX_FMT_YUV444P:
-    case AV_PIX_FMT_YUV410P:
-    case AV_PIX_FMT_YUV411P:
-        sws_scale(ctx->sws_grayf32_to_gray8, (const uint8_t *[4]){(const uint8_t *)dnn_output->data, 0, 0, 0},
-                  (const int[4]){frame->width * sizeof(float), 0, 0, 0},
-                  0, frame->height, (uint8_t * const*)frame->data, frame->linesize);
-        return 0;
     default:
+        av_log(ctx, AV_LOG_ERROR, "%s not supported.\n", av_get_pix_fmt_name(fmt));
         return AVERROR(EIO);
-    }
-
-    return 0;
-}
-
-static av_always_inline int isPlanarYUV(enum AVPixelFormat pix_fmt)
-{
-    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(pix_fmt);
-    av_assert0(desc);
-    return !(desc->flags & AV_PIX_FMT_FLAG_RGB) && desc->nb_components == 3;
-}
-
-static int copy_uv_planes(DnnProcessing2Context *ctx, AVFrame *out, const AVFrame *in)
-{
-    const AVPixFmtDescriptor *desc;
-    int uv_height;
-
-    if (!ctx->sws_uv_scale) {
-        av_assert0(in->height == out->height && in->width == out->width);
-        desc = av_pix_fmt_desc_get(in->format);
-        uv_height = AV_CEIL_RSHIFT(in->height, desc->log2_chroma_h);
-        for (int i = 1; i < 3; ++i) {
-            int bytewidth = av_image_get_linesize(in->format, in->width, i);
-            av_image_copy_plane(out->data[i], out->linesize[i],
-                                in->data[i], in->linesize[i],
-                                bytewidth, uv_height);
-        }
-    } else {
-        sws_scale(ctx->sws_uv_scale, (const uint8_t **)(in->data + 1), in->linesize + 1,
-                  0, ctx->sws_uv_height, out->data + 1, out->linesize + 1);
-        sws_scale(ctx->sws_uv_scale, (const uint8_t **)(in->data + 2), in->linesize + 2,
-                  0, ctx->sws_uv_height, out->data + 2, out->linesize + 2);
     }
 
     return 0;
@@ -460,9 +435,9 @@ static int flush_frame(AVFilterContext *ctx, AVFilterLink *outlink, int64_t pts,
     if (s->already_flushed)
         return ret;
 
-    while (!ff_dnn_interface_frame_queue_empty(ctx, s->dnn_interface)) {
+    while (!ff_dnn_interface_frame_queue_empty(s->dnn_interface)) {
         AVFrame *output = NULL;
-        ff_dnn_interface_get_frame(ctx, s->base, &output);
+        ff_dnn_interface_get_frame(s->dnn_interface, &output);
         if (output) {
             if (outlink) {
                 ret = ff_filter_frame(outlink, output);
@@ -473,7 +448,6 @@ static int flush_frame(AVFilterContext *ctx, AVFilterLink *outlink, int64_t pts,
             }
         }
 
-        ff_dnn_interface_send_event(ctx, s->base, INFERENCE_EVENT_EOS);
         av_usleep(5000);
     }
 
@@ -481,17 +455,15 @@ static int flush_frame(AVFilterContext *ctx, AVFilterLink *outlink, int64_t pts,
     return ret;
 }
 
-static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+static int activate(AVFilterContext *ctx)
 {
-    AVFilterContext *context  = inlink->dst;
-    AVFilterLink *outlink = context->outputs[0];
-    DnnProcessing2Context *ctx = context->priv;
-    DNNReturnType dnn_result;
-    AVFrame *out;
+    AVFilterLink *inlink = ctx->inputs[0];
+    AVFilterLink *outlink = ctx->outputs[0];
+    DnnProcessing2Context *s = ctx->priv;
+    AVFrame *in = NULL, *output = NULL;
     int64_t pts;
     int ret, status;
     int got_frame = 0;
-
 
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
 
@@ -502,11 +474,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         if (ret < 0)
             return ret;
         if (ret > 0)
-            ff_dnn_interface_send_frame(ctx->base, in);
+           ff_dnn_interface_send_frame(s->dnn_interface, in);
 
         // drain all processed frames
         do {
-            get_frame_status = ff_dnn_interface_get_frame(ctx, s->base, &output);
+            get_frame_status = ff_dnn_interface_get_frame(s->dnn_interface, &output);
             if (output) {
                 int ret_val = ff_filter_frame(outlink, output);
                 if (ret_val < 0)
@@ -536,46 +508,56 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     FF_FILTER_FORWARD_WANTED(outlink, inlink);
 
     return FFERROR_NOT_READY;
-
-    /*
-    copy_from_frame_to_dnn(ctx, in);
-
-    dnn_result = (ctx->dnn_module->execute_model)(ctx->model, &ctx->output, 1);
-    if (dnn_result != DNN_SUCCESS){
-        av_log(ctx, AV_LOG_ERROR, "failed to execute model\n");
-        av_frame_free(&in);
-        return AVERROR(EIO);
-    }
-
-    out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-    if (!out) {
-        av_frame_free(&in);
-        return AVERROR(ENOMEM);
-    }
-
-    av_frame_copy_props(out, in);
-    copy_from_dnn_to_frame(ctx, out);
-
-    if (isPlanarYUV(in->format))
-        copy_uv_planes(ctx, out, in);
-
-    av_frame_free(&in);
-    return ff_filter_frame(outlink, out);
-    */
 }
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
-    DnnProcessing2Context *context = ctx->priv;
+    DnnProcessing2Context *s = ctx->priv;
 
-    sws_freeContext(context->sws_gray8_to_grayf32);
-    sws_freeContext(context->sws_grayf32_to_gray8);
-    sws_freeContext(context->sws_uv_scale);
+    sws_freeContext(s->sws_resize);
+    sws_freeContext(s->sws_gray8_to_grayf32);
+    sws_freeContext(s->sws_grayf32_to_gray8);
+    sws_freeContext(s->sws_uv_scale);
 
-    if (context->dnn_module)
-        (context->dnn_module->free_model)(&context->model);
+    ff_dnn_interface_release(s->dnn_interface);
+}
 
-    av_freep(&context->dnn_module);
+static int config_input(AVFilterLink *inlink)
+{
+    AVFilterContext *context     = inlink->dst;
+    DnnProcessingsContext *ctx = context->priv;
+    DNNReturnType result;
+    DNNData model_input;
+    int check;
+
+    result = ctx->dnn_interface->model->get_input(ctx->dnn_interface->model->model, &model_input, ctx->model_inputname);
+    if (result != DNN_SUCCESS) {
+        av_log(ctx, AV_LOG_ERROR, "could not get input from the model\n");
+        return AVERROR(EIO);
+    }
+
+    check = check_modelinput_inlink(&model_input, inlink);
+    if (check != 0) {
+        return check;
+    }
+
+    // FIXME: do we need this for sync mode?
+    /*
+    ctx->input.width    = inlink->w;
+    ctx->input.height   = inlink->h;
+    ctx->input.channels = model_input.channels;
+    ctx->input.dt = model_input.dt;
+
+    result = (ctx->model->set_input_output)(ctx->model->model,
+                                        &ctx->input, ctx->model_inputname,
+                                        (const char **)&ctx->model_outputname, 1);
+    if (result != DNN_SUCCESS) {
+        av_log(ctx, AV_LOG_ERROR, "could not set input and output for the model\n");
+        return AVERROR(EIO);
+    }
+    */
+
+    return 0;
 }
 
 static const AVFilterPad dnn_processing2_inputs[] = {
@@ -583,7 +565,6 @@ static const AVFilterPad dnn_processing2_inputs[] = {
         .name         = "default",
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = config_input,
-        .filter_frame = filter_frame,
     },
     { NULL }
 };
@@ -604,7 +585,9 @@ AVFilter ff_vf_dnn_processing2 = {
     .init          = init,
     .uninit        = uninit,
     .query_formats = query_formats,
+    .activate      = activate,
     .inputs        = dnn_processing2_inputs,
     .outputs       = dnn_processing2_outputs,
     .priv_class    = &dnn_processing2_class,
+    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE, // TODO: What is this for?
 };

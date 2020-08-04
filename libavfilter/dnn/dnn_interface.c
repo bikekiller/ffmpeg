@@ -29,7 +29,6 @@
 #include "dnn_backend_openvino.h"
 #include "libavutil/mem.h"
 
-#if 0
 static int copy_from_frame_to_dnn(FFBaseInference *ctx, const AVFrame *frame)
 {
     int bytewidth = av_image_get_linesize(frame->format, frame->width, 0);
@@ -70,7 +69,6 @@ static int copy_from_frame_to_dnn(FFBaseInference *ctx, const AVFrame *frame)
 
     return 0;
 }
-#endif
 
 DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
 {
@@ -101,6 +99,7 @@ DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
     #if (CONFIG_LIBOPENVINO == 1)
         dnn_module->load_model = &ff_dnn_load_model_ov;
         dnn_module->execute_model = &ff_dnn_execute_model_ov;
+        dnn_module->execute_model_async = &ff_dnn_execute_model_async_ov;
         dnn_module->free_model = &ff_dnn_free_model_ov;
     #else
         av_freep(&dnn_module);
@@ -116,7 +115,7 @@ DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
     return dnn_module;
 }
 
-FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferenceParam *param) {
+FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferenceParam *param, AVFilterContext *filter_ctx) {
     if (!param)
         return NULL;
 
@@ -124,16 +123,38 @@ FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferencePa
     if (base_inference == NULL)
         return NULL;
 
-    //set_log_function(ff_log_function);
-    //set_trace_function(ff_trace_function);
-
+    base_inference->filter_ctx = filter_ctx;
     base_inference->inference_id = inference_id ? av_strdup(inference_id) : NULL;
     base_inference->param = *param;
+
+    base_inference->processed_frames = ff_list_alloc();
+    av_assert0(base_inference->processed_frames);
+    pthread_mutex_init(&base_inference->processing_frames_mutex, NULL);
 
     // TODO: create image inference backend and stuff for async inference
     //base->inference = (void *)FFInferenceImplCreate(base);
 
     return base_inference;
+}
+
+void ff_dnn_interface_set_pre_proc(FFBaseInference *base, DNNPreProc pre_proc)
+{
+    if (!base)
+        return;
+
+    base->pre_proc = pre_proc;
+
+    return;
+}
+
+void ff_dnn_interface_set_post_proc(FFBaseInference *base, DNNPostProc post_proc)
+{
+    if (!base)
+        return;
+
+    base->post_proc = post_proc;
+
+    return;
 }
 
 void ff_dnn_interface_release(FFBaseInference *base) {
@@ -144,6 +165,8 @@ void ff_dnn_interface_release(FFBaseInference *base) {
     //    FFInferenceImplRelease((FFInferenceImpl *)base->inference);
     //    base->inference = NULL;
     //}
+    ff_list_free(base->processed_frames);
+    pthread_mutex_destroy(&base->processing_frames_mutex);
 
     if (base->dnn_module)
         (base->dnn_module->free_model)(&base->model);
@@ -158,38 +181,118 @@ void ff_dnn_interface_release(FFBaseInference *base) {
     av_free(base);
 }
 
+static inline void PushOutput(FFBaseInference *base) {
+    ff_list_t *processing_frames = base->processing_frames;
+    ff_list_t *processed = base->processed_frames;
+
+    while (!processing_frames->empty(processing_frames)) {
+        ProcessingFrame *front = (ProcessingFrame *)processing_frames->front(processing_frames);
+        if (!front->inference_done) {
+            break; // inference not completed yet
+        }
+        processed->push_back(processed, front->frame_out);
+        processing_frames->pop_front(processing_frames);
+        av_free(front);
+    }
+}
+
+static void InferenceCompletionCallback(DNNData *model_output, ProcessingFrame *processing_frame, FFBaseInference *base) {
+
+    if (!base->post_proc || !processing_frame || !base) {
+        av_log(NULL, AV_LOG_ERROR, "invalid parameter\n");
+        return;
+    }
+
+    // post proc: DNNData to AVFrame, 
+    if (((DNNPostProc)base->post_proc)(model_output, processing_frame->frame_in, &processing_frame->frame_out, base) != 0) {
+       av_log(NULL, AV_LOG_ERROR, "post_proc failed\n");
+       return
+    }
+    processing_frame->inference_done = 1;
+
+    pthread_mutex_lock(&base->processing_frames_mutex);
+    PushOutput(base);
+    pthread_mutex_unlock(&base->processing_frames_mutex);
+
+    return;
+}
+
 int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
     if (!base || !frame_in)
         return AVERROR(EINVAL);
 
-    //return FFInferenceImplAddFrame(ctx, (FFInferenceImpl *)base->inference, frame_in);
+    // preproc
+    DNNData input_blob;
+    int ret = (base->model->get_input_blob)(base->model, &input_blob, base->model_inputname);
 
-    // per-proc and set input blob
+    if(!base->pre_proc) {
+        av_log(NULL, AV_LOG_ERROR, "pre_proc function not specified\n");
+        return AVERROR(EINVAL);
+    }
 
-#if 0
-    copy_from_frame_to_dnn(base, in);
-#endif
+    (base->preproc)(frame_in, &input_blob, base);
 
-    // TODO: submit inference request
+    // inference
+    if (base->dnn_module->execute_model_async) {
 
-#if 0
-    dnn_result = (ctx->dnn_module->execute_model)(ctx->model, &ctx->output, 1);
+       // push into processing_frames queue
+       pthread_mutex_lock(&base->processing_frames_mutex);
+       ProcessingFrame *processing_frame = (ProcessingFrame *)av_malloc(sizeof(ProcessingFrame));
+       if (processing_frame == NULL) {
+          pthread_mutex_unlock(&base->processing_frames_mutex);
+          return AVERROR(EINVAL);
+       }
+       processing_frame->frame_in = frame_in;
+       processing_frame->frame_out = NULL;
+       processing_frame->inference_done = 0;
+       base->processing_frames->push_back(base->processing_frames, processing_frame);
+       pthread_mutex_unlock(&base->processing_frames_mutex);
+
+       InferenceContext *inference_ctx = (InferenceContext *)malloc(sizeof(InferenceContext));
+       inference_ctx->processing_frame = processing_frame;
+       inference_ctx->cb = InferenceCompletionCallback;
+       inference_ctx->base = base;
+
+       dnn_result = (base->dnn_module->execute_model_async)(base->model, inference_ctx, 1); 
+
+    } else {
+       dnn_result = (base->dnn_module->execute_model)(base->model, &base->output, 1);
+    }
+
     if (dnn_result != DNN_SUCCESS){
-        av_log(ctx, AV_LOG_ERROR, "failed to execute model\n");
+        av_log(NULL, AV_LOG_ERROR, "failed to execute model asynchronously\n");
         av_frame_free(&in);
         return AVERROR(EIO);
     }
-#endif
+
+    // post proc for sync inference
+    if (!base->dnn_module->execute_model_async) {
+
+       ProcessingFrame processing_frame;
+
+       processing_frame.frame_in = frame_in;
+       processing_frame.frame_out = NULL;
+       if (base->post_proc(&base->output, &processing_frame, base) != 0) {
+          return -1;
+       }
+
+       base->processed_frames->push_back(base->processed_frames, processed_frames.frame_out);
+    }
 
     return 0;
 }
 
 int ff_dnn_interface_get_frame(FFBaseInference *base, AVFrame **frame_out) {
-    if (!base || !frame_out)
-        return AVERROR(EINVAL);
+    ff_list_t *l = base->processed_frames;
 
-    // TODO:
-    //return FFInferenceImplGetFrame(ctx, (FFInferenceImpl *)base->inference, frame_out);
+    if (l->empty(l) || !frame_out)
+        return AVERROR(EAGAIN);
+
+    pthread_mutex_lock(&base->processing_frames_mutex);
+    *frame = (AVFrame *)l->front(l);
+    l->pop_front(l);
+    pthread_mutex_unlock(&base->processing_frames_mutex);
+
     return 0;
 }
 
@@ -197,18 +300,10 @@ int ff_dnn_interface_frame_queue_empty(FFBaseInference *base) {
     if (!base)
         return AVERROR(EINVAL);
 
-    // TODO:
-    //return FFInferenceImplGetQueueSize(ctx, (FFInferenceImpl *)base->inference) == 0 ? TRUE : FALSE;
-    return 0;
-}
-
-int ff_dnn_interface_resource_status(FFBaseInference *base) {
-    if (!base)
-        return AVERROR(EINVAL);
-
-    // TODO:
-    //return FFInferenceImplResourceStatus(ctx, (FFInferenceImpl *)base->inference);
-    return 0;
+    ff_list_t *out = base->processing_frames;
+    ff_list_t *pro = base->processed_frames;
+    av_log(NULL, AV_LOG_INFO, "output:%zu processed:%zu\n", out->size(out), pro->size(pro));
+    return out->size(out) + pro->size(pro);
 }
 
 void ff_dnn_interface_send_event(FFBaseInference *base, FF_INFERENCE_EVENT event) {
