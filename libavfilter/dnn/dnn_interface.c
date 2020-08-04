@@ -28,47 +28,10 @@
 #include "dnn_backend_tf.h"
 #include "dnn_backend_openvino.h"
 #include "libavutil/mem.h"
-
-static int copy_from_frame_to_dnn(FFBaseInference *ctx, const AVFrame *frame)
-{
-    int bytewidth = av_image_get_linesize(frame->format, frame->width, 0);
-    DNNData *dnn_input = &ctx->input;
-
-    switch (frame->format) {
-    case AV_PIX_FMT_RGB24:
-    case AV_PIX_FMT_BGR24:
-        if (dnn_input->dt == DNN_FLOAT) {
-            sws_scale(ctx->sws_gray8_to_grayf32, (const uint8_t **)frame->data, frame->linesize,
-                      0, frame->height, (uint8_t * const*)(&dnn_input->data),
-                      (const int [4]){frame->width * 3 * sizeof(float), 0, 0, 0});
-        } else {
-            av_assert0(dnn_input->dt == DNN_UINT8);
-            av_image_copy_plane(dnn_input->data, bytewidth,
-                                frame->data[0], frame->linesize[0],
-                                bytewidth, frame->height);
-        }
-        return 0;
-    case AV_PIX_FMT_GRAY8:
-    case AV_PIX_FMT_GRAYF32:
-        av_image_copy_plane(dnn_input->data, bytewidth,
-                            frame->data[0], frame->linesize[0],
-                            bytewidth, frame->height);
-        return 0;
-    case AV_PIX_FMT_YUV420P:
-    case AV_PIX_FMT_YUV422P:
-    case AV_PIX_FMT_YUV444P:
-    case AV_PIX_FMT_YUV410P:
-    case AV_PIX_FMT_YUV411P:
-        sws_scale(ctx->sws_gray8_to_grayf32, (const uint8_t **)frame->data, frame->linesize,
-                  0, frame->height, (uint8_t * const*)(&dnn_input->data),
-                  (const int [4]){frame->width * sizeof(float), 0, 0, 0});
-        return 0;
-    default:
-        return AVERROR(EIO);
-    }
-
-    return 0;
-}
+#include "libavutil/avassert.h"
+#include "libavutil/imgutils.h"
+#include "libswscale/swscale.h"
+#include <pthread.h>
 
 DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
 {
@@ -126,18 +89,18 @@ FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferencePa
 
     base_inference->dnn_module = ff_get_dnn_module(param->backend_type);
     if (!base_inference->dnn_module) {
-        av_log(ctx, AV_LOG_ERROR, "could not create DNN module for requested backend\n");
+        av_log(filter_ctx, AV_LOG_ERROR, "could not create DNN module for requested backend\n");
         goto err;
     }
 
     if (!base_inference->dnn_module->load_model) {
-        av_log(ctx, AV_LOG_ERROR, "load_model for network is not specified\n");
+        av_log(filter_ctx, AV_LOG_ERROR, "load_model for network is not specified\n");
         goto err;
     }
 
-    base_inference->model = (base_inference->dnn_module->load_model)(base_inference->model_filename);
+    base_inference->model = (base_inference->dnn_module->load_model)(param->model_filename);
     if (!base_inference->model) {
-        av_log(ctx, AV_LOG_ERROR, "could not load DNN model\n");
+        av_log(filter_ctx, AV_LOG_ERROR, "could not load DNN model\n");
         goto err;
     }
 
@@ -147,7 +110,7 @@ FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferencePa
 
     base_inference->processed_frames = ff_list_alloc();
     av_assert0(base_inference->processed_frames);
-    pthread_mutex_init(&base_inference->processing_frames_mutex, NULL);
+    pthread_mutex_init(&base_inference->output_frames_mutex, NULL);
 
     return base_inference;
 
@@ -187,7 +150,7 @@ void ff_dnn_interface_release(FFBaseInference *base) {
     //    base->inference = NULL;
     //}
     ff_list_free(base->processed_frames);
-    pthread_mutex_destroy(&base->processing_frames_mutex);
+    pthread_mutex_destroy(&base->output_frames_mutex);
 
     if (base->dnn_module)
         (base->dnn_module->free_model)(&base->model);
@@ -227,47 +190,50 @@ static void InferenceCompletionCallback(DNNData *model_output, ProcessingFrame *
     // post proc: DNNData to AVFrame, 
     if (((DNNPostProc)base->post_proc)(model_output, processing_frame->frame_in, &processing_frame->frame_out, base) != 0) {
        av_log(NULL, AV_LOG_ERROR, "post_proc failed\n");
-       return
+       return;
     }
     processing_frame->inference_done = 1;
 
-    pthread_mutex_lock(&base->processing_frames_mutex);
+    pthread_mutex_lock(&base->output_frames_mutex);
     PushOutput(base);
-    pthread_mutex_unlock(&base->processing_frames_mutex);
+    pthread_mutex_unlock(&base->output_frames_mutex);
 
     return;
 }
 
 int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
+
+    DNNReturnType dnn_result;
+
     if (!base || !frame_in)
         return AVERROR(EINVAL);
 
     // preproc
     DNNData input_blob;
-    int ret = (base->model->get_input_blob)(base->model, &input_blob, base->model_inputname);
+    int ret = (base->model->get_input_blob)(base->model, &input_blob, base->param.model_inputname);
 
     if(!base->pre_proc) {
         av_log(NULL, AV_LOG_ERROR, "pre_proc function not specified\n");
         return AVERROR(EINVAL);
     }
 
-    (base->preproc)(frame_in, &input_blob, base);
+    ((DNNPreProc)(base->pre_proc))(frame_in, &input_blob, base);
 
     // inference
     if (base->dnn_module->execute_model_async) {
 
        // push into processing_frames queue
-       pthread_mutex_lock(&base->processing_frames_mutex);
+       pthread_mutex_lock(&base->output_frames_mutex);
        ProcessingFrame *processing_frame = (ProcessingFrame *)av_malloc(sizeof(ProcessingFrame));
        if (processing_frame == NULL) {
-          pthread_mutex_unlock(&base->processing_frames_mutex);
+          pthread_mutex_unlock(&base->output_frames_mutex);
           return AVERROR(EINVAL);
        }
        processing_frame->frame_in = frame_in;
        processing_frame->frame_out = NULL;
        processing_frame->inference_done = 0;
        base->processing_frames->push_back(base->processing_frames, processing_frame);
-       pthread_mutex_unlock(&base->processing_frames_mutex);
+       pthread_mutex_unlock(&base->output_frames_mutex);
 
        InferenceContext *inference_ctx = (InferenceContext *)malloc(sizeof(InferenceContext));
        inference_ctx->processing_frame = processing_frame;
@@ -282,22 +248,18 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
 
     if (dnn_result != DNN_SUCCESS){
         av_log(NULL, AV_LOG_ERROR, "failed to execute model asynchronously\n");
-        av_frame_free(&in);
+        av_frame_free(&frame_in); // FIXME: do we need to free the input frame?
         return AVERROR(EIO);
     }
 
     // post proc for sync inference
     if (!base->dnn_module->execute_model_async) {
 
-       ProcessingFrame processing_frame;
-
-       processing_frame.frame_in = frame_in;
-       processing_frame.frame_out = NULL;
-       if (base->post_proc(&base->output, &processing_frame, base) != 0) {
+       AVFrame *frame_out = NULL;
+       if (((DNNPostProc)base->post_proc)(&base->output, frame_in, &frame_out, base) != 0) {
           return -1;
        }
-
-       base->processed_frames->push_back(base->processed_frames, processed_frames.frame_out);
+       base->processed_frames->push_back(base->processed_frames, frame_out);
     }
 
     return 0;
@@ -309,10 +271,10 @@ int ff_dnn_interface_get_frame(FFBaseInference *base, AVFrame **frame_out) {
     if (l->empty(l) || !frame_out)
         return AVERROR(EAGAIN);
 
-    pthread_mutex_lock(&base->processing_frames_mutex);
-    *frame = (AVFrame *)l->front(l);
+    pthread_mutex_lock(&base->output_frames_mutex);
+    *frame_out = (AVFrame *)l->front(l);
     l->pop_front(l);
-    pthread_mutex_unlock(&base->processing_frames_mutex);
+    pthread_mutex_unlock(&base->output_frames_mutex);
 
     return 0;
 }
@@ -325,13 +287,4 @@ int ff_dnn_interface_frame_queue_empty(FFBaseInference *base) {
     ff_list_t *pro = base->processed_frames;
     av_log(NULL, AV_LOG_INFO, "output:%zu processed:%zu\n", out->size(out), pro->size(pro));
     return out->size(out) + pro->size(pro);
-}
-
-void ff_dnn_interface_send_event(FFBaseInference *base, FF_INFERENCE_EVENT event) {
-    if (!base)
-        return;
-
-    // TODO:
-    //FFInferenceImplSinkEvent(ctx, (FFInferenceImpl *)base->inference, event);
-    return 0;
 }

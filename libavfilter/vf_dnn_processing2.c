@@ -271,7 +271,7 @@ static int pre_proc(AVFrame *frame_in, DNNData *model_input, FFBaseInference *ba
       return -1;
 
    DnnProcessing2Context *ctx = (DnnProcessing2Context *)base->filter_ctx->priv;
-   if (copy_from_frame_to_dnn(ctx, frame_in, model_input) != 0) {
+_type   if (copy_from_frame_to_dnn(ctx, frame_in, model_input) != 0) {
       av_log(ctx, AV_LOG_ERROR, "copy_from_frame_to_dnn failed\n");
       return -1;
    }
@@ -327,11 +327,11 @@ static av_cold int init(AVFilterContext *context)
 
     FFInferenceParam param = { };
 
-    param.model           = s->model_filename;
+    param.model_filename  = s->model_filename;
     param.model_inputname = s->model_inputname;
     param.model_outputname = s->model_outputname;
     param.batch_size      = s->batch_size;
-    param.backend         = DNN_OV; // FIXME: temp for testing
+    param.backend_type    = DNN_OV; // FIXME: temp for testing
 
     s->dnn_interface = ff_dnn_interface_create(context->filter->name, &param, context);
     if (!s->dnn_interface) {
