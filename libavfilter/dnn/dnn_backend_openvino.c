@@ -110,48 +110,6 @@ err:
     return DNN_ERROR;
 }
 
-static DNNReturnType get_output_ov(void *model, DNNData *output, const char *output_name)
-{
-   DNNReturnType ret = DNN_SUCCESS;
-   OVModel *ov_model = (OVModel *)model;
-   ie_blob_t *output_blob = NULL;
-   ie_blob_buffer_t blob_buffer;
-   dimensions_t dims;
-   precision_e precision;
-
-   IEStatusCode status = ie_infer_request_infer(ov_model->infer_request);
-   if (status != OK)
-      return DNN_ERROR;
-
-   status = ie_infer_request_get_blob(ov_model->infer_request, output_name, &output_blob);
-   if (status != OK) {
-      return DNN_ERROR;
-   }
-
-   status = ie_blob_get_buffer(output_blob, &blob_buffer);
-   if (status != OK) {
-      ret = DNN_ERROR;
-      goto out;
-   }
-
-   status |= ie_blob_get_dims(output_blob, &dims);
-   status |= ie_blob_get_precision(output_blob, &precision);
-   if (status != OK) {
-      ret = DNN_ERROR;
-      goto out;
-   }
-
-   output->channels = dims.dims[1];
-   output->height   = dims.dims[2];
-   output->width    = dims.dims[3];
-   output->dt       = precision_to_datatype(precision);
-   output->data     = blob_buffer.buffer;
-
-out:
-   ie_blob_free(&output_blob);
-   return ret;
-}
-
 static DNNReturnType get_input_ov(void *model, DNNData *input, const char *input_name)
 {
     OVModel *ov_model = (OVModel *)model;
@@ -352,8 +310,8 @@ static void completion_callback(void *args) {
     RequestContext *request = (RequestContext *)args;
     InferenceContext *inference_ctx = request->inference_ctx;
     ProcessingFrame *processing_frame = inference_ctx->processing_frame;
-    FFBaseInference *base = inference_ctx->base;
-    DNNModel *model = (DNNModel*)base->model;
+    DnnInterface *dnn_interface = inference_ctx->dnn_interface;
+    DNNModel *model = (DNNModel*)dnn_interface->model;
     OVModel *ov_model = (OVModel*)model->model;
     dimensions_t dims;
     precision_e precision;
@@ -361,8 +319,6 @@ static void completion_callback(void *args) {
     char *blob_name;
     ie_blob_t *out_blob;
 
-
-    //VAII_DEBUG(__FUNCTION__);
     pthread_mutex_lock(&ov_model->callback_mutex);
 
     if (request->blob_name)
@@ -400,7 +356,7 @@ static void completion_callback(void *args) {
     output.data     = blob_buffer.buffer;
 
     // DNNData to AVFrame
-    ((InferCallback)inference_ctx->cb)(&output, processing_frame, base);
+    ((InferCallback)inference_ctx->cb)(&output, processing_frame, dnn_interface);
 
     av_free(inference_ctx);
 
@@ -410,28 +366,7 @@ out:
     av_free(blob_name);
     if (out_blob)
         ie_blob_free(&out_blob);
-
     pthread_mutex_unlock(&ov_model->callback_mutex);
-
-    //VAII_DEBUG("EXIT");
-}
-
-DNNReturnType ff_dnn_execute_model_sync_ov(const DNNModel *model, InferenceContext *inference_ctx, const char *blob_name)
-{
-    OVModel *ov_model = (OVModel *)model->model;
-    RequestContext *request_ctx = (RequestContext *)SafeQueuePop(ov_model->request_ctx_q);
-
-    request_ctx->callback.completeCallBackFunc = completion_callback;
-    request_ctx->callback.args = request_ctx;
-    request_ctx->inference_ctx = inference_ctx;
-    request_ctx->blob_name = blob_name;
-
-    IEStatusCode status = ie_infer_request_infer(request_ctx->infer_request);
-    if (status != OK)
-        return DNN_ERROR;
-    completion_callback(request_ctx);
-
-    return DNN_SUCCESS;
 }
 
 DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, InferenceContext *inference_ctx, const char *blob_name)

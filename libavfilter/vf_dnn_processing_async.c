@@ -44,7 +44,7 @@ typedef struct DnnProcessingAsyncContext {
     char *model_inputname;
     char *model_outputname;
 
-    FFBaseInference *dnn_interface;
+    DnnInterface *dnn_interface;
     //DNNModule *dnn_module;
     //DNNModel *model;
 
@@ -88,7 +88,7 @@ static const AVOption dnn_processing_async_options[] = {
     { NULL }
 };
 
-static int pre_proc(AVFrame *frame_in, DNNData *model_input, FFBaseInference *dnn_interface)
+static int pre_proc(AVFrame *frame_in, DNNData *model_input, DnnInterface *dnn_interface)
 {
    DNNData *input;
 
@@ -110,7 +110,7 @@ static int pre_proc(AVFrame *frame_in, DNNData *model_input, FFBaseInference *dn
    return 0;
 }
 
-static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, FFBaseInference *dnn_interface)
+static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, DnnInterface *dnn_interface)
 {
    if (!model_output || !frame_in || !frame_out_p || !dnn_interface)
       return -1; 
@@ -160,7 +160,7 @@ static av_cold int init(AVFilterContext *context)
         return AVERROR(EINVAL);
     }
 
-    FFInferenceParam param = { };
+    InferenceParam param = { };
     param.model_filename  = ctx->model_filename;
     param.model_inputname = ctx->model_inputname;
     param.model_outputname = ctx->model_outputname;
@@ -169,7 +169,7 @@ static av_cold int init(AVFilterContext *context)
     param.batch_size      = ctx->batch_size;
     param.backend_type    = DNN_OV; // FIXME: temp for testing
 
-    ctx->dnn_interface = ff_dnn_interface_create(context->filter->name, &param, context);
+    ctx->dnn_interface = dnn_interface_create(context->filter->name, &param, context);
     av_log(ctx, AV_LOG_INFO, "async (%d), batch_size(%d), nireq(%d)\n", param.async, param.batch_size, param.nireq);
 
     if (!ctx->dnn_interface) {
@@ -177,8 +177,8 @@ static av_cold int init(AVFilterContext *context)
         return AVERROR(EINVAL);
     }
 
-    ff_dnn_interface_set_pre_proc(ctx->dnn_interface, (DNNPreProc)pre_proc);
-    ff_dnn_interface_set_post_proc(ctx->dnn_interface, (DNNPostProc)post_proc);
+    dnn_interface_set_pre_proc(ctx->dnn_interface, (DNNPreProc)pre_proc);
+    dnn_interface_set_post_proc(ctx->dnn_interface, (DNNPostProc)post_proc);
 
     ctx->already_flushed = 0;
 
@@ -542,7 +542,7 @@ static av_cold void uninit(AVFilterContext *ctx)
     sws_freeContext(context->sws_grayf32_to_gray8);
     sws_freeContext(context->sws_uv_scale);
 
-    ff_dnn_interface_release(context->dnn_interface);
+    dnn_interface_release(context->dnn_interface);
     //if (context->dnn_module)
     //    (context->dnn_module->free_model)(&context->model);
 
@@ -557,9 +557,9 @@ static int flush_frame(AVFilterContext *filter_ctx, AVFilterLink *outlink, int64
     if (ctx->already_flushed)
         return ret;
 
-    while (!ff_dnn_interface_frame_queue_empty(ctx->dnn_interface)) {
+    while (!dnn_interface_frame_queue_empty(ctx->dnn_interface)) {
         AVFrame *output = NULL;
-        ff_dnn_interface_get_frame(ctx->dnn_interface, &output);
+        dnn_interface_get_frame(ctx->dnn_interface, &output);
         if (output) {
             if (outlink) {
                 ret = ff_filter_frame(outlink, output);
@@ -596,11 +596,11 @@ static int activate(AVFilterContext *filter_ctx)
         if (ret < 0)
             return ret;
         if (ret > 0)
-              ff_dnn_interface_send_frame(ctx->dnn_interface, in);
+            dnn_interface_send_frame(ctx->dnn_interface, in);
 
         // ret >= 0, drain all processed frames
         while (get_frame_status == 0) {
-            get_frame_status = ff_dnn_interface_get_frame(ctx->dnn_interface, &output);
+            get_frame_status = dnn_interface_get_frame(ctx->dnn_interface, &output);
             if (output) {
                 int ret_val = ff_filter_frame(outlink, output);
                 if (ret_val < 0)
@@ -612,9 +612,8 @@ static int activate(AVFilterContext *filter_ctx)
     } while (ret > 0);
 
     // if frame got, schedule to next filter
-    if (got_frame) {
+    if (got_frame)
         return 0;
-    }
 
     if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
         if (status == AVERROR_EOF) {

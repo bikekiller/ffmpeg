@@ -63,7 +63,6 @@ DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
         dnn_module->load_model = &ff_dnn_load_model_ov;
         dnn_module->execute_model = &ff_dnn_execute_model_ov;
         dnn_module->execute_model_async = &ff_dnn_execute_model_async_ov;
-        dnn_module->execute_model_sync = &ff_dnn_execute_model_sync_ov;
         dnn_module->free_model = &ff_dnn_free_model_ov;
     #else
         av_freep(&dnn_module);
@@ -79,102 +78,96 @@ DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
     return dnn_module;
 }
 
-FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferenceParam *param, AVFilterContext *filter_ctx) {
+DnnInterface *dnn_interface_create(const char *inference_id, InferenceParam *param, AVFilterContext *filter_ctx) {
 
     if (!param)
         return NULL;
 
-    FFBaseInference *base_inference = (FFBaseInference *)av_mallocz(sizeof(*base_inference));
-    if (base_inference == NULL)
+    DnnInterface *dnn_interface = (DnnInterface *)av_mallocz(sizeof(*dnn_interface));
+    if (dnn_interface == NULL)
         return NULL;
 
-    base_inference->param = *param;
+    dnn_interface->param = *param;
 
-
-    base_inference->dnn_module = ff_get_dnn_module(base_inference->param.backend_type);
-
-    if (!base_inference->dnn_module) {
+    dnn_interface->dnn_module = ff_get_dnn_module(dnn_interface->param.backend_type);
+    if (!dnn_interface->dnn_module) {
         av_log(filter_ctx, AV_LOG_ERROR, "could not create DNN module for requested backend\n");
         goto err;
     }
 
-    if (!base_inference->dnn_module->load_model) {
+    if (!dnn_interface->dnn_module->load_model) {
         av_log(filter_ctx, AV_LOG_ERROR, "load_model for network is not specified\n");
         goto err;
     }
 
-    base_inference->model = (base_inference->dnn_module->load_model)(param->model_filename);
-    if (!base_inference->model) {
+    dnn_interface->model = (dnn_interface->dnn_module->load_model)(param->model_filename);
+    if (!dnn_interface->model) {
         av_log(filter_ctx, AV_LOG_ERROR, "could not load DNN model\n");
         goto err;
     }
 
-    base_inference->async_run = base_inference->dnn_module->execute_model_async && base_inference->param.async;
-    base_inference->inference_id = inference_id ? av_strdup(inference_id) : NULL;
-    base_inference->processing_frames = ff_list_alloc();
-    av_assert0(base_inference->processing_frames);
-    base_inference->processed_frames = ff_list_alloc();
-    av_assert0(base_inference->processed_frames);
-    base_inference->filter_ctx = filter_ctx;
-    pthread_mutex_init(&base_inference->output_frames_mutex, NULL);
+    dnn_interface->async_run = dnn_interface->dnn_module->execute_model_async && dnn_interface->param.async;
+    dnn_interface->inference_id = inference_id ? av_strdup(inference_id) : NULL;
+    dnn_interface->processing_frames = ff_list_alloc();
+    av_assert0(dnn_interface->processing_frames);
+    dnn_interface->processed_frames = ff_list_alloc();
+    av_assert0(dnn_interface->processed_frames);
+    dnn_interface->filter_ctx = filter_ctx;
+    pthread_mutex_init(&dnn_interface->frame_q_mutex, NULL);
 
-    return base_inference;
+    return dnn_interface;
 
 err:
-    av_freep(&base_inference->dnn_module);
-    av_free(base_inference);
+    av_freep(&dnn_interface->dnn_module);
+    av_free(dnn_interface);
 
     return NULL;
 }
 
-void ff_dnn_interface_set_pre_proc(FFBaseInference *base, DNNPreProc pre_proc)
+void dnn_interface_set_pre_proc(DnnInterface *dnn_interface, DNNPreProc pre_proc)
 {
-    if (!base)
+    if (!dnn_interface)
         return;
 
-    base->pre_proc = pre_proc;
+    dnn_interface->pre_proc = pre_proc;
 
     return;
 }
 
-void ff_dnn_interface_set_post_proc(FFBaseInference *base, DNNPostProc post_proc)
+void dnn_interface_set_post_proc(DnnInterface *dnn_interface, DNNPostProc post_proc)
 {
-    if (!base)
+    if (!dnn_interface)
         return;
 
-    base->post_proc = post_proc;
+    dnn_interface->post_proc = post_proc;
 
     return;
 }
 
-void ff_dnn_interface_release(FFBaseInference *base) {
-    if (!base)
+void dnn_interface_release(DnnInterface *dnn_interface) {
+    if (!dnn_interface)
         return;
 
-    //if (base->inference) {
-    //    FFInferenceImplRelease((FFInferenceImpl *)base->inference);
-    //    base->inference = NULL;
-    //}
-    ff_list_free(base->processing_frames);
-    ff_list_free(base->processed_frames);
-    pthread_mutex_destroy(&base->output_frames_mutex);
+    ff_list_free(dnn_interface->processing_frames);
+    ff_list_free(dnn_interface->processed_frames);
+    pthread_mutex_destroy(&dnn_interface->frame_q_mutex);
 
-    if (base->dnn_module)
-        (base->dnn_module->free_model)(&base->model);
+    if (dnn_interface->dnn_module)
+        (dnn_interface->dnn_module->free_model)(&dnn_interface->model);
 
-    av_freep(&base->dnn_module);
+    av_freep(&dnn_interface->dnn_module);
 
-    if (base->inference_id) {
-        av_free((void *)base->inference_id);
-        base->inference_id = NULL;
+    if (dnn_interface->inference_id) {
+        av_free((void *)dnn_interface->inference_id);
+        dnn_interface->inference_id = NULL;
     }
 
-    av_free(base);
+    av_free(dnn_interface);
 }
 
-static inline void PushOutput(FFBaseInference *base) {
-    ff_list_t *processing_frames = base->processing_frames;
-    ff_list_t *processed = base->processed_frames;
+static inline void PushOutput(DnnInterface *dnn_interface) {
+    ff_list_t *processing_frames = dnn_interface->processing_frames;
+    ff_list_t *processed = dnn_interface->processed_frames;
 
     while (!processing_frames->empty(processing_frames)) {
         ProcessingFrame *front = (ProcessingFrame *)processing_frames->front(processing_frames);
@@ -187,72 +180,73 @@ static inline void PushOutput(FFBaseInference *base) {
     }
 }
 
-static void InferenceCompletionCallback(DNNData *model_output, ProcessingFrame *processing_frame, FFBaseInference *base) {
+static void InferenceCompletionCallback(DNNData *model_output, ProcessingFrame *processing_frame, DnnInterface *dnn_interface) {
 
-    if (!base->post_proc || !processing_frame || !base) {
+    if (!dnn_interface->post_proc || !processing_frame || !dnn_interface) {
         av_log(NULL, AV_LOG_ERROR, "invalid parameter\n");
         return;
     }
 
     // post proc: DNNData to AVFrame, 
-    if (((DNNPostProc)base->post_proc)(model_output, processing_frame->frame_in, &processing_frame->frame_out, base) != 0) {
+    if (((DNNPostProc)dnn_interface->post_proc)(model_output, processing_frame->frame_in, &processing_frame->frame_out, dnn_interface) != 0) {
        av_log(NULL, AV_LOG_ERROR, "post_proc failed\n");
        return;
     }
+
     processing_frame->inference_done = 1;
 
-    pthread_mutex_lock(&base->output_frames_mutex);
-    PushOutput(base);
-    pthread_mutex_unlock(&base->output_frames_mutex);
+    pthread_mutex_lock(&dnn_interface->frame_q_mutex);
+    PushOutput(dnn_interface);
+    pthread_mutex_unlock(&dnn_interface->frame_q_mutex);
 
     return;
 }
 
-int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
+int dnn_interface_send_frame(DnnInterface *dnn_interface, AVFrame *frame_in) {
 
     DNNReturnType dnn_result;
     DNNData model_output;
 
-    if (!base || !frame_in)
+    if (!dnn_interface || !frame_in)
         return AVERROR(EINVAL);
 
     // preproc
     DNNData input_blob;
 
-    (base->model->get_input_blob)(base->model->model, &input_blob, base->param.model_inputname);
+    (dnn_interface->model->get_input_blob)(dnn_interface->model->model, &input_blob, dnn_interface->param.model_inputname);
 
-    if(!base->pre_proc) {
+    if(!dnn_interface->pre_proc) {
         av_log(NULL, AV_LOG_ERROR, "pre_proc function not specified\n");
         return AVERROR(EINVAL);
     }
 
-    ((DNNPreProc)(base->pre_proc))(frame_in, &input_blob, base);
+    ((DNNPreProc)(dnn_interface->pre_proc))(frame_in, &input_blob, dnn_interface);
 
     // inference
-    if (base->async_run) {
+    if (dnn_interface->async_run) {
 
        // push into processing_frames queue
-       pthread_mutex_lock(&base->output_frames_mutex);
+       pthread_mutex_lock(&dnn_interface->frame_q_mutex);
        ProcessingFrame *processing_frame = (ProcessingFrame *)av_malloc(sizeof(ProcessingFrame)); // release in PushOutput()
        if (processing_frame == NULL) {
-          pthread_mutex_unlock(&base->output_frames_mutex);
+          pthread_mutex_unlock(&dnn_interface->frame_q_mutex);
           return AVERROR(EINVAL);
        }
        processing_frame->frame_in = frame_in;
        processing_frame->frame_out = NULL;
        processing_frame->inference_done = 0;
-       base->processing_frames->push_back(base->processing_frames, processing_frame);
-       pthread_mutex_unlock(&base->output_frames_mutex);
+       dnn_interface->processing_frames->push_back(dnn_interface->processing_frames, processing_frame);
+       pthread_mutex_unlock(&dnn_interface->frame_q_mutex);
 
        InferenceContext *inference_ctx = (InferenceContext *)av_malloc(sizeof(InferenceContext)); // release in model callback
        inference_ctx->processing_frame = processing_frame;
        inference_ctx->cb = InferenceCompletionCallback;
-       inference_ctx->base = base;
+       inference_ctx->dnn_interface = dnn_interface;
 
-       dnn_result = (base->dnn_module->execute_model_async)(base->model, inference_ctx, base->param.model_outputname);
+       dnn_result = (dnn_interface->dnn_module->execute_model_async)(dnn_interface->model, inference_ctx, dnn_interface->param.model_outputname);
 
     } else {
-       dnn_result = (base->dnn_module->execute_model)(base->model, &model_output, 1);
+       dnn_result = (dnn_interface->dnn_module->execute_model)(dnn_interface->model, &model_output, 1);
     }
 
     if (dnn_result != DNN_SUCCESS){
@@ -260,42 +254,41 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
         return AVERROR(EIO);
     }
 
-    if (!base->async_run) {
+    if (!dnn_interface->async_run) {
        AVFrame *frame_out;
 
-       if (((DNNPostProc)base->post_proc)(&model_output, frame_in, &frame_out, base) != 0) {
+       if (((DNNPostProc)dnn_interface->post_proc)(&model_output, frame_in, &frame_out, dnn_interface) != 0) {
           return AVERROR(EIO);
        }
 
-       base->processed_frames->push_back(base->processed_frames, frame_out);
+       dnn_interface->processed_frames->push_back(dnn_interface->processed_frames, frame_out);
     }
 
     return 0;
 }
 
-int ff_dnn_interface_get_frame(FFBaseInference *base, AVFrame **frame_out) {
-    ff_list_t *l = base->processed_frames;
+int dnn_interface_get_frame(DnnInterface *dnn_interface, AVFrame **frame_out) {
+    ff_list_t *l = dnn_interface->processed_frames;
 
-    //ff_dnn_interface_frame_queue_empty(base);
     if (l->empty(l) || !frame_out)
         return AVERROR(EAGAIN);
 
-    pthread_mutex_lock(&base->output_frames_mutex);
+    pthread_mutex_lock(&dnn_interface->frame_q_mutex);
     *frame_out = (AVFrame *)l->front(l);
     l->pop_front(l);
-    pthread_mutex_unlock(&base->output_frames_mutex);
+    pthread_mutex_unlock(&dnn_interface->frame_q_mutex);
 
     return 0;
 }
 
-int ff_dnn_interface_frame_queue_empty(FFBaseInference *base) {
-    if (!base)
+int dnn_interface_frame_queue_empty(DnnInterface *dnn_interface) {
+    if (!dnn_interface)
         return AVERROR(EINVAL);
 
-    ff_list_t *pro = base->processed_frames;
+    ff_list_t *pro = dnn_interface->processed_frames;
 
-    if (base->async_run) {
-       ff_list_t *out = base->processing_frames;
+    if (dnn_interface->async_run) {
+       ff_list_t *out = dnn_interface->processing_frames;
        av_log(NULL, AV_LOG_INFO, "output:%zu processed:%zu\n", out->size(out), pro->size(pro));
        return out->size(out) + pro->size(pro) == 0 ? 1 : 0;
     } else {
