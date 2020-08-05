@@ -371,16 +371,10 @@ static void completion_callback(void *args) {
     ie_network_get_outputs_number(ov_model->network, &num_outputs);
 
     ie_blob_t *out_blob = NULL;
-    for (size_t i = 0; i < num_outputs; i++) {
-        if (i != out_blob_id) 
-           continue;
-
-        char *output_name = NULL;
-        ie_network_get_output_name(ov_model->network, i, &output_name);
-        ie_infer_request_get_blob(request->infer_request, output_name, &out_blob);
-        free(output_name);
-        break;
-    }
+    char *output_name = NULL;
+    ie_network_get_output_name(ov_model->network, out_blob_id, &output_name);
+    ie_infer_request_get_blob(request->infer_request, output_name, &out_blob);
+    free(output_name);
 
     if (!out_blob) {
        av_log(NULL, AV_LOG_ERROR, "failed to get out blob\n");

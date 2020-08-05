@@ -614,7 +614,7 @@ static int activate(AVFilterContext *filter_ctx)
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
 
     do {
-        int get_frame_status;
+        int get_frame_status = 0;
         // drain all input frames
         ret = ff_inlink_consume_frame(inlink, &in);
         if (ret < 0)
@@ -626,8 +626,8 @@ static int activate(AVFilterContext *filter_ctx)
               return filter_frame(inlink, in);
         }
 
-        // ret == 0, drain all processed frames, only for async mode
-        do {
+        // ret >= 0, drain all processed frames, only for async mode
+        while (get_frame_status == 0 && ctx->async) {
             get_frame_status = ff_dnn_interface_get_frame(ctx->dnn_interface, &output);
             if (output) {
                 int ret_val = ff_filter_frame(outlink, output);
@@ -637,7 +637,7 @@ static int activate(AVFilterContext *filter_ctx)
                 got_frame = 1;
                 output = NULL;
             }
-        } while (get_frame_status == 0);
+        };
     } while (ret > 0);
 
     // if frame got, schedule to next filter, only for async mode

@@ -107,6 +107,8 @@ FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferencePa
     }
 
     base_inference->inference_id = inference_id ? av_strdup(inference_id) : NULL;
+    base_inference->processing_frames = ff_list_alloc();
+    av_assert0(base_inference->processing_frames);
     base_inference->processed_frames = ff_list_alloc();
     av_assert0(base_inference->processed_frames);
     base_inference->filter_ctx = filter_ctx;
@@ -149,6 +151,7 @@ void ff_dnn_interface_release(FFBaseInference *base) {
     //    FFInferenceImplRelease((FFInferenceImpl *)base->inference);
     //    base->inference = NULL;
     //}
+    ff_list_free(base->processing_frames);
     ff_list_free(base->processed_frames);
     pthread_mutex_destroy(&base->output_frames_mutex);
 
@@ -220,7 +223,7 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
     ((DNNPreProc)(base->pre_proc))(frame_in, &input_blob, base);
 
     // inference
-    if (base->dnn_module->execute_model_async && base->async) {
+    if (base->dnn_module->execute_model_async) {
 
        // push into processing_frames queue
        pthread_mutex_lock(&base->output_frames_mutex);
@@ -240,7 +243,7 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
        inference_ctx->cb = InferenceCompletionCallback;
        inference_ctx->base = base;
 
-       dnn_result = (base->dnn_module->execute_model_async)(base->model, inference_ctx, 1); 
+       dnn_result = (base->dnn_module->execute_model_async)(base->model, inference_ctx, 0 /*FIXME: specify by filter option */);
 
     } else {
        dnn_result = (base->dnn_module->execute_model)(base->model, &base->output, 1);
@@ -253,7 +256,7 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
     }
 
     // post proc for sync inference
-    if (!base->dnn_module->execute_model_async || !base->async) {
+    if (!base->dnn_module->execute_model_async) {
 
        AVFrame *frame_out = NULL;
        if (((DNNPostProc)base->post_proc)(&base->output, frame_in, &frame_out, base) != 0) {
@@ -285,7 +288,7 @@ int ff_dnn_interface_frame_queue_empty(FFBaseInference *base) {
 
     ff_list_t *pro = base->processed_frames;
 
-    if (base->dnn_module->execute_model_async && base->async) {
+    if (base->dnn_module->execute_model_async) {
        ff_list_t *out = base->processing_frames;
        av_log(NULL, AV_LOG_INFO, "output:%zu processed:%zu\n", out->size(out), pro->size(pro));
        return out->size(out) + pro->size(pro) == 0 ? 1 : 0;
