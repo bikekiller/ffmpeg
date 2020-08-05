@@ -107,6 +107,8 @@ struct __FFInferenceParam {
     char *model_filename;                                                                                                       
     char *model_inputname;
     char *model_outputname;
+    int async;
+    int nireq;
     int batch_size;                                                                                                    
     int backend_type;                                                                                                    
 };

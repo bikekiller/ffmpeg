@@ -87,7 +87,9 @@ FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferencePa
     if (base_inference == NULL)
         return NULL;
 
-    base_inference->dnn_module = ff_get_dnn_module(param->backend_type);
+    base_inference->param = *param;
+    base_inference->dnn_module = ff_get_dnn_module(base_inference->param.backend_type);
+
     if (!base_inference->dnn_module) {
         av_log(filter_ctx, AV_LOG_ERROR, "could not create DNN module for requested backend\n");
         goto err;
@@ -104,15 +106,11 @@ FFBaseInference *ff_dnn_interface_create(const char *inference_id, FFInferencePa
         goto err;
     }
 
-    base_inference->filter_ctx = filter_ctx;
     base_inference->inference_id = inference_id ? av_strdup(inference_id) : NULL;
-    base_inference->param = *param;
-
     base_inference->processed_frames = ff_list_alloc();
     av_assert0(base_inference->processed_frames);
+    base_inference->filter_ctx = filter_ctx;
     pthread_mutex_init(&base_inference->output_frames_mutex, NULL);
-
-    base_inference->async = 0; // FIXME: temp for debug
 
     return base_inference;
 
@@ -290,9 +288,9 @@ int ff_dnn_interface_frame_queue_empty(FFBaseInference *base) {
     if (base->dnn_module->execute_model_async && base->async) {
        ff_list_t *out = base->processing_frames;
        av_log(NULL, AV_LOG_INFO, "output:%zu processed:%zu\n", out->size(out), pro->size(pro));
-       return out->size(out) + pro->size(pro);
+       return out->size(out) + pro->size(pro) == 0 ? 1 : 0;
     } else {
        av_log(NULL, AV_LOG_INFO, "processed:%zu\n", pro->size(pro));
-       return pro->size(pro);
+       return pro->size(pro) == 0 ? 1 : 0;
     }
 }
