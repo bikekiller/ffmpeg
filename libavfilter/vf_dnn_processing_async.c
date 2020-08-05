@@ -82,7 +82,7 @@ static const AVOption dnn_processing_async_options[] = {
     { "model",       "path to model file",         OFFSET(model_filename),   AV_OPT_TYPE_STRING,    { .str = NULL }, 0, 0, FLAGS },
     { "input",       "input name of the model",    OFFSET(model_inputname),  AV_OPT_TYPE_STRING,    { .str = NULL }, 0, 0, FLAGS },
     { "output",      "output name of the model",   OFFSET(model_outputname), AV_OPT_TYPE_STRING,    { .str = NULL }, 0, 0, FLAGS },
-    { "async",       "enable async inference",     OFFSET(async),            AV_OPT_TYPE_BOOL,      { .i64 = 0}, 0, 1, FLAGS},
+    { "async",       "enable async inference",     OFFSET(async),            AV_OPT_TYPE_BOOL,      { .i64 = 1}, 0, 1, FLAGS},
     { "nireq",       "inference request number",   OFFSET(nireq),            AV_OPT_TYPE_INT,       { .i64 = 1 },  1, 128,  FLAGS},
     { "batch_size",  "batch size per infer",       OFFSET(batch_size),       AV_OPT_TYPE_INT,       { .i64 = 1 },    1, 1000, FLAGS},
     { NULL }
@@ -527,39 +527,6 @@ static int copy_uv_planes(DnnProcessingAsyncContext *ctx, AVFrame *out, const AV
     return 0;
 }
 
-static int filter_frame(AVFilterLink *inlink, AVFrame *in)
-{
-    AVFilterContext *context  = inlink->dst;
-    AVFilterLink *outlink = context->outputs[0];
-    DnnProcessingAsyncContext *ctx = context->priv;
-    DNNReturnType dnn_result;
-    AVFrame *out;
-
-    copy_from_frame_to_dnn(ctx, in, &ctx->input);
-
-    dnn_result = (ctx->dnn_interface->dnn_module->execute_model)(ctx->dnn_interface->model, &ctx->output, 1);
-    if (dnn_result != DNN_SUCCESS){
-        av_log(ctx, AV_LOG_ERROR, "failed to execute model\n");
-        av_frame_free(&in);
-        return AVERROR(EIO);
-    }
-
-    out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-    if (!out) {
-        av_frame_free(&in);
-        return AVERROR(ENOMEM);
-    }
-
-    av_frame_copy_props(out, in);
-    copy_from_dnn_to_frame(ctx, out, &ctx->output);
-
-    if (isPlanarYUV(in->format))
-        copy_uv_planes(ctx, out, in);
-
-    av_frame_free(&in);
-    return ff_filter_frame(outlink, out);
-}
-
 static av_cold void uninit(AVFilterContext *ctx)
 {
     DnnProcessingAsyncContext *context = ctx->priv;
@@ -613,9 +580,6 @@ static int activate(AVFilterContext *filter_ctx)
     int ret, status;
     int got_frame = 0;
 
-    //if (av_load_balance_get())
-    //    return load_balance(filter_ctx);
-
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
 
     do {
@@ -625,14 +589,11 @@ static int activate(AVFilterContext *filter_ctx)
         if (ret < 0)
             return ret;
         if (ret > 0) {
-           if (ctx->async)
-              ff_dnn_interface_send_frame(ctx->dnn_interface, in);
-           else
-              return filter_frame(inlink, in);
+           ff_dnn_interface_send_frame(ctx->dnn_interface, in);
         }
 
-        // ret >= 0, drain all processed frames, only for async mode
-        while (get_frame_status == 0 && ctx->async) {
+        // ret >= 0, drain all processed frames
+        while (get_frame_status == 0) {
             get_frame_status = ff_dnn_interface_get_frame(ctx->dnn_interface, &output);
             if (output) {
                 int ret_val = ff_filter_frame(outlink, output);
@@ -645,7 +606,7 @@ static int activate(AVFilterContext *filter_ctx)
         };
     } while (ret > 0);
 
-    // if frame got, schedule to next filter, only for async mode
+    // if frame got, schedule to next filter
     if (got_frame)
         return 0;
 
@@ -671,7 +632,6 @@ static const AVFilterPad dnn_processing_async_inputs[] = {
         .name         = "default",
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = config_input,
-        //.filter_frame = filter_frame,
     },
     { NULL }
 };

@@ -35,6 +35,8 @@ DNNReturnType ff_dnn_execute_model_ov(const DNNModel *model, DNNData *outputs, u
 
 DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, InferenceContext *inference_ctx, const char *blob_name);
 
+DNNReturnType ff_dnn_execute_model_sync_ov(const DNNModel *model, InferenceContext *inference_ctx, const char *blob_name);
+
 void ff_dnn_free_model_ov(DNNModel **model);
 
 #endif

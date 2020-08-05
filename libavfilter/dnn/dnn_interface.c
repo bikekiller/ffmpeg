@@ -63,6 +63,7 @@ DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
         dnn_module->load_model = &ff_dnn_load_model_ov;
         dnn_module->execute_model = &ff_dnn_execute_model_ov;
         dnn_module->execute_model_async = &ff_dnn_execute_model_async_ov;
+        dnn_module->execute_model_sync = &ff_dnn_execute_model_sync_ov;
         dnn_module->free_model = &ff_dnn_free_model_ov;
     #else
         av_freep(&dnn_module);
@@ -223,46 +224,35 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
 
     ((DNNPreProc)(base->pre_proc))(frame_in, &input_blob, base);
 
+    // push into processing_frames queue
+    pthread_mutex_lock(&base->output_frames_mutex);
+    ProcessingFrame *processing_frame = (ProcessingFrame *)av_malloc(sizeof(ProcessingFrame)); // release in PushOutput()
+    if (processing_frame == NULL) {
+       pthread_mutex_unlock(&base->output_frames_mutex);
+       return AVERROR(EINVAL);
+    }
+    processing_frame->frame_in = frame_in;
+    processing_frame->frame_out = NULL;
+    processing_frame->inference_done = 0;
+    base->processing_frames->push_back(base->processing_frames, processing_frame);
+    pthread_mutex_unlock(&base->output_frames_mutex);
+
+    InferenceContext *inference_ctx = (InferenceContext *)av_malloc(sizeof(InferenceContext)); // release in model callback
+    inference_ctx->processing_frame = processing_frame;
+    inference_ctx->cb = InferenceCompletionCallback;
+    inference_ctx->base = base;
+
     // inference
     if (base->dnn_module->execute_model_async && base->param.async) {
-
-       // push into processing_frames queue
-       pthread_mutex_lock(&base->output_frames_mutex);
-       ProcessingFrame *processing_frame = (ProcessingFrame *)av_malloc(sizeof(ProcessingFrame));
-       if (processing_frame == NULL) {
-          pthread_mutex_unlock(&base->output_frames_mutex);
-          return AVERROR(EINVAL);
-       }
-       processing_frame->frame_in = frame_in;
-       processing_frame->frame_out = NULL;
-       processing_frame->inference_done = 0;
-       base->processing_frames->push_back(base->processing_frames, processing_frame);
-       pthread_mutex_unlock(&base->output_frames_mutex);
-
-       InferenceContext *inference_ctx = (InferenceContext *)malloc(sizeof(InferenceContext));
-       inference_ctx->processing_frame = processing_frame;
-       inference_ctx->cb = InferenceCompletionCallback;
-       inference_ctx->base = base;
-
        dnn_result = (base->dnn_module->execute_model_async)(base->model, inference_ctx, base->param.model_outputname);
     } else {
-       dnn_result = (base->dnn_module->execute_model)(base->model, &base->output, 1);
+       dnn_result = (base->dnn_module->execute_model_sync)(base->model, inference_ctx, base->param.model_outputname);
     }
 
     if (dnn_result != DNN_SUCCESS){
         av_log(NULL, AV_LOG_ERROR, "failed to execute model asynchronously\n");
         av_frame_free(&frame_in); // FIXME: do we need to free the input frame?
         return AVERROR(EIO);
-    }
-
-    // post proc for sync inference
-    if (!base->param.async) {
-
-       AVFrame *frame_out = NULL;
-       if (((DNNPostProc)base->post_proc)(&base->output, frame_in, &frame_out, base) != 0) {
-          return -1;
-       }
-       base->processed_frames->push_back(base->processed_frames, frame_out);
     }
 
     return 0;

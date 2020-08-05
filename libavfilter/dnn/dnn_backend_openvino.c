@@ -403,6 +403,8 @@ static void completion_callback(void *args) {
     // DNNData to AVFrame
     ((InferCallback)inference_ctx->cb)(&output, processing_frame, base);
 
+    av_free(inference_ctx);
+
     SafeQueuePush(ov_model->request_ctx_q, request);
 
 out:
@@ -413,6 +415,24 @@ out:
     pthread_mutex_unlock(&ov_model->callback_mutex);
 
     //VAII_DEBUG("EXIT");
+}
+
+DNNReturnType ff_dnn_execute_model_sync_ov(const DNNModel *model, InferenceContext *inference_ctx, const char *blob_name)
+{
+    OVModel *ov_model = (OVModel *)model->model;
+    RequestContext *request_ctx = (RequestContext *)SafeQueuePop(ov_model->request_ctx_q);
+
+    request_ctx->callback.completeCallBackFunc = completion_callback;
+    request_ctx->callback.args = request_ctx;
+    request_ctx->inference_ctx = inference_ctx;
+    request_ctx->blob_name = blob_name;
+
+    IEStatusCode status = ie_infer_request_infer(request_ctx->infer_request);
+    if (status != OK)
+        return DNN_ERROR;
+    completion_callback(request_ctx);
+
+    return DNN_SUCCESS;
 }
 
 DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, InferenceContext *inference_ctx, const char *blob_name)
