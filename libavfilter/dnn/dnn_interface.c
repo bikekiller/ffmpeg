@@ -243,8 +243,7 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
        inference_ctx->cb = InferenceCompletionCallback;
        inference_ctx->base = base;
 
-       dnn_result = (base->dnn_module->execute_model_async)(base->model, inference_ctx, 0 /*FIXME: specify by filter option */);
-
+       dnn_result = (base->dnn_module->execute_model_async)(base->model, inference_ctx, base->param.model_outputname);
     } else {
        dnn_result = (base->dnn_module->execute_model)(base->model, &base->output, 1);
     }

@@ -81,7 +81,7 @@ typedef struct DNNModule{
     // Executes model with specified input and output. Returns DNN_ERROR otherwise.
     DNNReturnType (*execute_model)(const DNNModel *model, DNNData *outputs, uint32_t nb_output);
     // Executes model asynchronously. Release inference_ctx when execution done
-    DNNReturnType (*execute_model_async)(const DNNModel *model, InferenceContext *inference_ctx, uint32_t out_blob_id);
+    DNNReturnType (*execute_model_async)(const DNNModel *model, InferenceContext *inference_ctx, const char *output_name);
     // Frees memory allocated for model.
     void (*free_model)(DNNModel **model);
 } DNNModule;
