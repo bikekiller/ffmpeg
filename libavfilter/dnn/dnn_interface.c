@@ -213,7 +213,8 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
 
     // preproc
     DNNData input_blob;
-    int ret = (base->model->get_input_blob)(base->model->model, &input_blob, base->param.model_inputname);
+
+    (base->model->get_input_blob)(base->model->model, &input_blob, base->param.model_inputname);
 
     if(!base->pre_proc) {
         av_log(NULL, AV_LOG_ERROR, "pre_proc function not specified\n");
