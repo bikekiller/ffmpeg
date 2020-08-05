@@ -130,6 +130,7 @@ struct __FFBaseInference {
     DNNData input;
     DNNData output;
 
+    int async_run;
     // output frames list
     pthread_mutex_t output_frames_mutex;
     ff_list_t *processing_frames;    //

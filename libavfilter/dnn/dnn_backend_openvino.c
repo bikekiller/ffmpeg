@@ -319,7 +319,6 @@ DNNModel *ff_dnn_load_model_ov(const char *model_filename, const char *options)
     model->options = options;
     model->set_input_output = &set_input_output_ov;
     model->get_input = &get_input_ov;
-    model->get_output = &get_output_ov;
     model->get_input_blob = &get_input_blob_ov;
 
     return model;

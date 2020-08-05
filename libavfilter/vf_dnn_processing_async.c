@@ -90,11 +90,19 @@ static const AVOption dnn_processing_async_options[] = {
 
 static int pre_proc(AVFrame *frame_in, DNNData *model_input, FFBaseInference *dnn_interface)
 {
+   DNNData *input;
+
    if (!frame_in || !dnn_interface)
       return -1;
 
    DnnProcessingAsyncContext *ctx = (DnnProcessingAsyncContext *)dnn_interface->filter_ctx->priv;
-   if (copy_from_frame_to_dnn(ctx, frame_in, model_input) != 0) {
+
+   if (dnn_interface->async_run)
+      input = model_input;
+   else
+      input = &ctx->input;
+
+   if (copy_from_frame_to_dnn(ctx, frame_in, input) != 0) {
       av_log(ctx, AV_LOG_ERROR, "copy_from_frame_to_dnn failed\n");
       return -1;
    }
@@ -407,7 +415,6 @@ static int config_output(AVFilterLink *outlink)
 static int copy_from_frame_to_dnn(DnnProcessingAsyncContext *ctx, const AVFrame *frame, DNNData *dnn_input)
 {
     int bytewidth = av_image_get_linesize(frame->format, frame->width, 0);
-    //DNNData *dnn_input = &ctx->input;
 
     switch (frame->format) {
     case AV_PIX_FMT_RGB24:
@@ -588,9 +595,8 @@ static int activate(AVFilterContext *filter_ctx)
         ret = ff_inlink_consume_frame(inlink, &in);
         if (ret < 0)
             return ret;
-        if (ret > 0) {
-           ff_dnn_interface_send_frame(ctx->dnn_interface, in);
-        }
+        if (ret > 0)
+              ff_dnn_interface_send_frame(ctx->dnn_interface, in);
 
         // ret >= 0, drain all processed frames
         while (get_frame_status == 0) {
@@ -599,7 +605,6 @@ static int activate(AVFilterContext *filter_ctx)
                 int ret_val = ff_filter_frame(outlink, output);
                 if (ret_val < 0)
                     return ret_val;
-
                 got_frame = 1;
                 output = NULL;
             }
@@ -607,8 +612,9 @@ static int activate(AVFilterContext *filter_ctx)
     } while (ret > 0);
 
     // if frame got, schedule to next filter
-    if (got_frame)
+    if (got_frame) {
         return 0;
+    }
 
     if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
         if (status == AVERROR_EOF) {
