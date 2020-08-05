@@ -46,9 +46,10 @@ typedef struct DNNData{
 typedef struct __FFBaseInference FFBaseInference;
 typedef struct __FFInferenceParam FFInferenceParam;
 typedef struct __InferenceContext InferenceContext;
+typedef struct __ProcessingFrame ProcessingFrame;
 
 // common callback to call model-specific post proc and manage the internan frame queue
-typedef void (*InferCallback)(DNNData *out_blob, AVFrame *frame_out, FFBaseInference *base);
+typedef void (*InferCallback)(DNNData *out_blob, ProcessingFrame *processing_frame, FFBaseInference *base);
 
 // model-specific post proc function, parse inference result and store the result in frame_in/frame_out
 // For dnn processing filter, it may generate a new frame and return it using frame_out_p.
@@ -90,11 +91,11 @@ typedef struct DNNModule{
 // Initializes DNNModule depending on chosen backend.
 DNNModule *ff_get_dnn_module(DNNBackendType backend_type);
 
-typedef struct __ProcessingFrame {
+struct __ProcessingFrame {
     AVFrame *frame_in;
     AVFrame *frame_out;
     int inference_done;
-} ProcessingFrame;
+};
 
 struct __InferenceContext{
    ProcessingFrame *processing_frame;

@@ -223,7 +223,7 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
     ((DNNPreProc)(base->pre_proc))(frame_in, &input_blob, base);
 
     // inference
-    if (base->dnn_module->execute_model_async) {
+    if (base->dnn_module->execute_model_async && base->param.async) {
 
        // push into processing_frames queue
        pthread_mutex_lock(&base->output_frames_mutex);
@@ -255,7 +255,7 @@ int ff_dnn_interface_send_frame(FFBaseInference *base, AVFrame *frame_in) {
     }
 
     // post proc for sync inference
-    if (!base->dnn_module->execute_model_async) {
+    if (!base->param.async) {
 
        AVFrame *frame_out = NULL;
        if (((DNNPostProc)base->post_proc)(&base->output, frame_in, &frame_out, base) != 0) {

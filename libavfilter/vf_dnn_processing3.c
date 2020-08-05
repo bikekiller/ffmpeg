@@ -65,6 +65,8 @@ typedef struct DnnProcessing3Context {
 
 static int copy_from_frame_to_dnn(DnnProcessing3Context *ctx, const AVFrame *frame, DNNData *dnn_input);
 static int copy_from_dnn_to_frame(DnnProcessing3Context *ctx, AVFrame *frame, const DNNData *dnn_output);
+static av_always_inline int isPlanarYUV(enum AVPixelFormat pix_fmt);
+static int copy_uv_planes(DnnProcessing3Context *ctx, AVFrame *out, const AVFrame *in);
 
 #define OFFSET(x) offsetof(DnnProcessing3Context, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM
@@ -122,6 +124,9 @@ static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_o
         av_frame_free(&frame_out);
         return AVERROR(EINVAL);
    }
+
+   if (isPlanarYUV(frame_in->format))
+        copy_uv_planes(ctx, frame_out, frame_in);
 
    *frame_out_p = frame_out;
 
