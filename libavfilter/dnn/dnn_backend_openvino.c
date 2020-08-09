@@ -35,6 +35,8 @@ typedef struct RequestContext {
     ie_infer_request_t *infer_request;
     ie_complete_call_back_t callback;
     InferenceContext *inference_ctx;
+    ProcessingFrame *processing_frame;
+    const DNNModel *model;
 } RequestContext;
 
 typedef struct OVModel{
@@ -47,12 +49,20 @@ typedef struct OVModel{
     uint32_t nb_output;
 
     // async support
+    pthread_mutex_t frame_q_mutex;
+    ff_list_t *processing_frames;
+    ff_list_t *processed_frames;
+
     int num_reqs;
     SafeQueueT *request_ctx_q; // queue to hold request context
     ie_infer_request_t **infer_requests;
     pthread_mutex_t callback_mutex;
 
+    UserData user_data;
 } OVModel;
+
+static DNNReturnType _ff_dnn_execute_model_ov(OVModel *model, DNNData *output, const char *output_name);
+static DNNReturnType get_output_ov(void *model, DNNData *output, const char *output_name);
 
 static DNNDataType precision_to_datatype(precision_e precision)
 {
@@ -110,6 +120,8 @@ err:
     return DNN_ERROR;
 }
 
+
+
 static DNNReturnType get_input_ov(void *model, DNNData *input, const char *input_name)
 {
     OVModel *ov_model = (OVModel *)model;
@@ -144,6 +156,7 @@ static DNNReturnType get_input_ov(void *model, DNNData *input, const char *input
             input->height   = dims.dims[2];
             input->width    = dims.dims[3];
             input->dt       = precision_to_datatype(precision);
+
             return DNN_SUCCESS;
         }
 
@@ -153,6 +166,46 @@ static DNNReturnType get_input_ov(void *model, DNNData *input, const char *input
     return DNN_ERROR;
 }
 
+static DNNReturnType _get_input_blob_ov(void *model, DNNData *input, const char *input_name)
+{
+   OVModel *ov_model = (OVModel *)model;
+   IEStatusCode status;
+   dimensions_t dims;
+   precision_e precision;
+   ie_blob_buffer_t blob_buffer;
+
+   av_assert0(ov_model->infer_request);
+
+   status = ie_infer_request_get_blob(ov_model->infer_request, input_name, &ov_model->input_blob);
+   if (status != OK)
+      goto err;
+
+   status |= ie_blob_get_dims(ov_model->input_blob, &dims);
+   status |= ie_blob_get_precision(ov_model->input_blob, &precision);
+   if (status != OK)
+      goto err;
+
+   input->channels = dims.dims[1];
+   input->height   = dims.dims[2];
+   input->width    = dims.dims[3];
+   input->dt       = precision_to_datatype(precision);
+
+   status = ie_blob_get_buffer(ov_model->input_blob, &blob_buffer);
+   if (status != OK)
+      goto err;
+
+   input->data = blob_buffer.buffer;
+
+   return DNN_SUCCESS;
+
+err:
+   if (ov_model->infer_request)
+      ie_infer_request_free(&ov_model->infer_request);
+
+   return DNN_ERROR;
+}
+
+
 static DNNReturnType set_input_output_ov(void *model, DNNData *input, const char *input_name, const char **output_names, uint32_t nb_output)
 {
     OVModel *ov_model = (OVModel *)model;
@@ -161,9 +214,7 @@ static DNNReturnType set_input_output_ov(void *model, DNNData *input, const char
     precision_e precision;
     ie_blob_buffer_t blob_buffer;
 
-    status = ie_exec_network_create_infer_request(ov_model->exe_network, &ov_model->infer_request);
-    if (status != OK)
-        goto err;
+    av_assert0(ov_model->infer_request);
 
     status = ie_infer_request_get_blob(ov_model->infer_request, input_name, &ov_model->input_blob);
     if (status != OK)
@@ -243,6 +294,10 @@ DNNModel *ff_dnn_load_model_ov(const char *model_filename, const char *options)
     if (status != OK)
         goto err;
 
+    // create infer request for sync mode
+    status = ie_exec_network_create_infer_request(ov_model->exe_network, &ov_model->infer_request);
+    if (status != OK)
+       goto err;
 
     int nireq = 8; // TODO: pass in as parameter
     ov_model->infer_requests = (ie_infer_request_t **)malloc(nireq * sizeof(ie_infer_request_t *));
@@ -278,6 +333,7 @@ DNNModel *ff_dnn_load_model_ov(const char *model_filename, const char *options)
     model->set_input_output = &set_input_output_ov;
     model->get_input = &get_input_ov;
     model->get_input_blob = &get_input_blob_ov;
+    model->get_output = &get_output_ov;
 
     return model;
 
@@ -285,6 +341,8 @@ err:
     if (model)
         av_freep(&model);
     if (ov_model) {
+        if (ov_model->infer_request)
+            ie_infer_request_free(&ov_model->infer_request);
         if (ov_model->infer_requests) {
            for (size_t i = 0; i < ov_model->num_reqs; ++i)
               if (ov_model->infer_requests[i])
@@ -302,7 +360,93 @@ err:
             ie_core_free(&ov_model->core);
         av_freep(&ov_model);
     }
+    av_log(NULL, AV_LOG_ERROR, "failed to get out blob\n");
     return NULL;
+}
+
+static void completion_callback2(void *args) {
+
+    RequestContext *request = (RequestContext *)args;
+    ProcessingFrame *processing_frame = request->processing_frame;
+    DNNModel *model = (DNNModel*)request->model;
+    OVModel *ov_model = (OVModel*)model->model;
+    dimensions_t dims;
+    precision_e precision;
+    IEStatusCode status;
+    char *blob_name;
+    ie_blob_t *out_blob;
+
+    pthread_mutex_lock(&ov_model->callback_mutex);
+
+    // get output blob
+    if (request->blob_name)
+       blob_name = av_strdup(request->blob_name);
+    else {
+       // defaultly return the first output blob
+       ie_network_get_output_name(ov_model->network, 0, &blob_name);
+    }
+
+    ie_infer_request_get_blob(request->infer_request, blob_name, &out_blob);
+    if (!out_blob) {
+       av_log(NULL, AV_LOG_ERROR, "failed to get out blob\n");
+       goto out;
+    }
+
+    ie_blob_buffer_t blob_buffer;
+    status = ie_blob_get_buffer(out_blob, &blob_buffer);
+    if (status != OK) {
+        av_log(NULL, AV_LOG_ERROR, "failed to get buffer\n");
+        goto out;
+    }
+
+    status |= ie_blob_get_dims(out_blob, &dims);
+    status |= ie_blob_get_precision(out_blob, &precision);
+    if (status != OK) {
+        av_log(NULL, AV_LOG_ERROR, "failed to get precision or dims\n");
+        goto out;
+    }
+
+    // output blob to DNNData 
+    DNNData output;
+    output.channels = dims.dims[1];
+    output.height   = dims.dims[2];
+    output.width    = dims.dims[3];
+    output.dt       = precision_to_datatype(precision);
+    output.data     = blob_buffer.buffer;
+
+    // model-specific post proc: DNNData to AVFrame, 
+    if (((DNNPostProc2)model->post_proc)(&output, processing_frame->frame_in, &processing_frame->frame_out, &ov_model->user_data) != 0) {
+       av_log(NULL, AV_LOG_ERROR, "post_proc failed\n");
+       goto out;
+    }
+
+    // mark done
+    processing_frame->inference_done = 1;
+
+    // enqueue processed frame queue
+    pthread_mutex_lock(&ov_model->frame_q_mutex);
+    ff_list_t *processing_frames = ov_model->processing_frames;
+    ff_list_t *processed = ov_model->processed_frames;
+
+    while (!processing_frames->empty(processing_frames)) {
+        ProcessingFrame *front = (ProcessingFrame *)processing_frames->front(processing_frames);
+        if (!front->inference_done) {
+            break; // inference not completed yet
+        }
+        processed->push_back(processed, front->frame_out);
+        processing_frames->pop_front(processing_frames);
+        av_free(front);
+    }
+    pthread_mutex_unlock(&ov_model->frame_q_mutex);
+
+    // give back the request resource
+    SafeQueuePush(ov_model->request_ctx_q, request);
+
+out:
+    av_free(blob_name);
+    if (out_blob)
+        ie_blob_free(&out_blob);
+    pthread_mutex_unlock(&ov_model->callback_mutex);
 }
 
 static void completion_callback(void *args) {
@@ -385,6 +529,8 @@ DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, InferenceCont
     return DNN_SUCCESS;
 }
 
+
+
 DNNReturnType ff_dnn_execute_model_ov(const DNNModel *model, DNNData *outputs, uint32_t nb_output)
 {
     dimensions_t dims;
@@ -450,4 +596,178 @@ void ff_dnn_free_model_ov(DNNModel **model)
         av_freep(&ov_model);
         av_freep(model);
     }
+}
+
+DNNModel *ff_dnn_load_model_2_ov(const char *model_filename, UserData *user_data)
+{
+    DNNModel *dnn_model = ff_dnn_load_model_ov(model_filename);
+    OVModel *ov_model = dnn_model->model;
+
+    ov_model->user_data = *user_data;
+
+    ov_model->processing_frames = ff_list_alloc();
+    av_assert0(ov_model->processing_frames);
+    ov_model->processed_frames = ff_list_alloc();
+    av_assert0(ov_model->processed_frames);
+
+    pthread_mutex_init(&ov_model->frame_q_mutex, NULL);
+
+    return dnn_model;
+}
+
+static DNNReturnType _ff_dnn_execute_model_ov(OVModel *ov_model, DNNData *output, const char *output_name)
+{
+    dimensions_t dims;
+    precision_e precision;
+    ie_blob_t *out_blob;
+    ie_blob_buffer_t blob_buffer;
+
+    av_assert0(ov_model->infer_request);
+    IEStatusCode status = ie_infer_request_infer(ov_model->infer_request);
+    if (status != OK)
+        return DNN_ERROR;
+
+    status = ie_infer_request_get_blob(ov_model->infer_request, output_name, &out_blob);
+    if (status != OK)
+       return DNN_ERROR;
+    status |= ie_blob_get_buffer(out_blob, &blob_buffer);
+    status |= ie_blob_get_dims(out_blob, &dims);
+    status |= ie_blob_get_precision(out_blob, &precision);
+    if (status != OK)
+       return DNN_ERROR;
+
+    output->channels = dims.dims[1];
+    output->height   = dims.dims[2];
+    output->width    = dims.dims[3];
+    output->dt       = precision_to_datatype(precision);
+    output->data     = blob_buffer.buffer;
+
+    return DNN_SUCCESS;
+}
+
+DNNReturnType ff_dnn_execute_model_2_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,
+                                        AVFrame **out, const char **output_names, uint32_t nb_output)
+{
+   DNNData input_blob, output;
+   OVModel *ov_model;
+
+   // FIXME: to support more than 1 output?
+   av_assert0(nb_output == 1);
+
+   if (!model)
+      return AVERROR(EINVAL);
+
+   ov_model = (OVModel *)model->model;
+
+   // get input blob
+   if (DNN_SUCCESS != _get_input_blob_ov(ov_model, &input_blob, model_input_name))
+      return AVERROR(EINVAL);
+
+   // preproc
+   if(!model->pre_proc) {
+      av_log(NULL, AV_LOG_ERROR, "pre_proc function not specified\n");
+      return AVERROR(EINVAL);
+   }
+   ((DNNPreProc2)(model->pre_proc))(in, &input_blob, &ov_model->user_data);
+
+   if (DNN_SUCCESS != _ff_dnn_execute_model_ov(ov_model, &output, output_names[0]))
+      return AVERROR(EINVAL);
+
+   return ((DNNPostProc2)model->post_proc)(&output, in, out, &ov_model->user_data);
+}
+
+DNNReturnType ff_dnn_execute_model_async_2_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,
+                                              const char **output_names, uint32_t nb_output)
+{
+    DNNData input_blob;
+    OVModel *ov_model;
+    UserData *user_data;
+
+    // FIXME: to support more than 1 output?
+    av_assert0(nb_output == 1);
+
+    if (!model || !in)
+        return AVERROR(EINVAL);
+
+    ov_model = (OVModel *)model->model;
+    user_data = &ov_model->user_data;
+
+    // preproc
+    (model->get_input_blob)(model->model, &input_blob, user_data->param.model_inputname);
+
+    if(!model->pre_proc) {
+        av_log(NULL, AV_LOG_ERROR, "pre_proc function not specified\n");
+        return AVERROR(EINVAL);
+    }
+
+    ((DNNPreProc2)(model->pre_proc))(in, &input_blob, user_data);
+
+    // create a ProcessingFrame instance and push it into processing_frames queue
+    pthread_mutex_lock(&ov_model->frame_q_mutex);
+    ProcessingFrame *processing_frame = (ProcessingFrame *)av_malloc(sizeof(ProcessingFrame)); // release in PushOutput()
+    if (processing_frame == NULL) {
+       pthread_mutex_unlock(&ov_model->frame_q_mutex);
+       return AVERROR(EINVAL);
+    }
+    processing_frame->frame_in = in;
+    processing_frame->frame_out = NULL;
+    processing_frame->inference_done = 0;
+    ov_model->processing_frames->push_back(ov_model->processing_frames, processing_frame);
+    pthread_mutex_unlock(&ov_model->frame_q_mutex);
+
+    // async inference
+    RequestContext *request_ctx = (RequestContext *)SafeQueuePop(ov_model->request_ctx_q);
+    request_ctx->processing_frame = processing_frame;
+    request_ctx->blob_name = user_data->param.model_outputname;
+    request_ctx->model = model;
+    request_ctx->callback.completeCallBackFunc = completion_callback2;
+    request_ctx->callback.args = request_ctx;
+
+    ie_infer_set_completion_callback(request_ctx->infer_request, &request_ctx->callback);
+    ie_infer_request_infer_async(request_ctx->infer_request);
+
+    return DNN_SUCCESS;
+}
+
+int ff_dnn_get_async_result_ov(const DNNModel *model, AVFrame **out)
+{
+    OVModel *ov_model;
+
+    if (!model || !out)
+       return AVERROR(EINVAL);
+
+    ov_model = (OVModel *)model->model;
+
+    ff_list_t *l = ov_model->processed_frames;
+
+    if (l->empty(l) || !out)
+        return AVERROR(EAGAIN);
+
+    pthread_mutex_lock(&ov_model->frame_q_mutex);
+    *out = (AVFrame *)l->front(l);
+    l->pop_front(l);
+    pthread_mutex_unlock(&ov_model->frame_q_mutex);
+
+    return 0;
+}
+
+int ff_dnn_frame_queue_empty_ov(const DNNModel *model)
+{
+    OVModel *ov_model;
+
+    if (!model)
+        return AVERROR(EINVAL);
+
+    ov_model = (OVModel *)model->model;
+
+    ff_list_t *pro = ov_model->processed_frames;
+    ff_list_t *out = ov_model->processing_frames;
+    av_log(NULL, AV_LOG_INFO, "output:%zu processed:%zu\n", out->size(out), pro->size(pro));
+
+    return out->size(out) + pro->size(pro) == 0 ? 1 : 0;
+}
+
+static DNNReturnType get_output_ov(void *model, DNNData *output, const char *output_name)
+{
+   return _ff_dnn_execute_model_ov((OVModel *)model, output, output_name);
 }

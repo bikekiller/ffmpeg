@@ -47,6 +47,7 @@ typedef struct __DnnInterface DnnInterface;
 typedef struct __InferenceParam InferenceParam;
 typedef struct __InferenceContext InferenceContext;
 typedef struct __ProcessingFrame ProcessingFrame;
+typedef struct __UserData UserData;
 
 // callback to call model-specific post proc and update the internal frame queue
 typedef void (*InferCallback)(DNNData *out_blob, ProcessingFrame *processing_frame, DnnInterface *dnn_interface);
@@ -56,10 +57,12 @@ typedef void (*InferCallback)(DNNData *out_blob, ProcessingFrame *processing_fra
 // For dnn processing filter, it may generate a new frame and return it using frame_out_p.
 // For analytic filter, store the inference result as side data of frame_in and make the *frame_out_p to ref the frame_in.
 typedef int (*DNNPostProc)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, DnnInterface *dnn_interface);
+typedef int (*DNNPostProc2)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, UserData *user_data);
 
 // model-specific pre proc function.
 // Convert and then copy the data in frame_in to model_input
 typedef int (*DNNPreProc)(AVFrame *frame_in, DNNData *model_input, DnnInterface *dnn_interface);
+typedef int (*DNNPreProc2)(AVFrame *frame_in, DNNData *model_input, UserData *user_data);
 
 typedef struct DNNModel{
     // Stores model that can be different for different backends.
@@ -74,6 +77,11 @@ typedef struct DNNModel{
     // Sets model input and output.
     // Should be called at least once before model execution.
     DNNReturnType (*set_input_output)(void *model, DNNData *input, const char *input_name, const char **output_names, uint32_t nb_output);
+
+    DNNReturnType (*get_output)(void *model, DNNData *output, const char *output_name);
+    DNNPreProc2 pre_proc;
+    DNNPostProc2 post_proc;
+    AVFilterContext *filter_ctx;
 } DNNModel;
 
 // Stores pointers to functions for loading, executing, freeing DNN models for one of the backends.
@@ -86,6 +94,15 @@ typedef struct DNNModule{
     DNNReturnType (*execute_model_async)(const DNNModel *model, InferenceContext *inference_ctx, const char *output_name);
     // Frees memory allocated for model.
     void (*free_model)(DNNModel **model);
+
+    DNNModel *(*load_model2)(const char *model_filename, UserData *user_data);
+    DNNReturnType (*execute_model2)(const DNNModel *model, AVFrame *in, const char *model_input_name, AVFrame **out, const char **output_names, uint32_t nb_output);
+    DNNReturnType (*execute_model_async2)(const DNNModel *model, AVFrame *in, const char *model_input_name, const char **output_names, uint32_t nb_output);
+    // return == 0: got a async result successfully, and can try to get next one.
+    // return != 0: async result is not ready.
+    int (*get_async_result)(const DNNModel *model, AVFrame **out);
+    int (*frame_queue_empty)(const DNNModel *model);
+
 } DNNModule;
 
 // Initializes DNNModule depending on chosen backend.
@@ -111,6 +128,11 @@ struct __InferenceParam {
     int nireq;
     int batch_size;                                                                                                    
     int backend_type;                                                                                                    
+};
+
+struct __UserData{
+   InferenceParam param;
+   AVFilterContext *filter_ctx;
 };
 
 struct __DnnInterface {

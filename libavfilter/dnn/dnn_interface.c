@@ -62,8 +62,13 @@ DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
     #if (CONFIG_LIBOPENVINO == 1)
         dnn_module->load_model = &ff_dnn_load_model_ov;
         dnn_module->execute_model = &ff_dnn_execute_model_ov;
-        dnn_module->execute_model_async = &ff_dnn_execute_model_async_ov;
         dnn_module->free_model = &ff_dnn_free_model_ov;
+        dnn_module->execute_model_async = &ff_dnn_execute_model_async_ov;
+        dnn_module->load_model2 = &ff_dnn_load_model_2_ov;
+        dnn_module->execute_model2 = &ff_dnn_execute_model_2_ov;
+        dnn_module->execute_model_async2 = &ff_dnn_execute_model_async_2_ov;
+        dnn_module->get_async_result = &ff_dnn_get_async_result_ov;
+        dnn_module->frame_queue_empty = &ff_dnn_frame_queue_empty_ov;
     #else
         av_freep(&dnn_module);
         return NULL;
@@ -202,7 +207,8 @@ static void InferenceCompletionCallback(DNNData *model_output, ProcessingFrame *
     return;
 }
 
-int dnn_interface_send_frame(DnnInterface *dnn_interface, AVFrame *frame_in) {
+int dnn_interface_send_frame(DnnInterface *dnn_interface, AVFrame *frame_in)
+{
 
     DNNReturnType dnn_result;
     DNNData model_output;

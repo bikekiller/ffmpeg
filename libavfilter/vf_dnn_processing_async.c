@@ -45,8 +45,8 @@ typedef struct DnnProcessingAsyncContext {
     char *model_outputname;
 
     DnnInterface *dnn_interface;
-    //DNNModule *dnn_module;
-    //DNNModel *model;
+    DNNModule *dnn_module;
+    DNNModel *model;
 
     // input & output of the model at execution time
     DNNData input;
@@ -110,6 +110,46 @@ static int pre_proc(AVFrame *frame_in, DNNData *model_input, DnnInterface *dnn_i
    return 0;
 }
 
+static int pre_proc2(AVFrame *frame_in, DNNData *model_input, UserData *user_data)
+{
+   if (!frame_in || !model_input || !user_data)
+      return -1;
+
+   DnnProcessingAsyncContext *ctx = (DnnProcessingAsyncContext *)user_data->filter_ctx->priv;
+
+   if (copy_from_frame_to_dnn(ctx, frame_in, model_input) != 0) {
+      av_log(ctx, AV_LOG_ERROR, "copy_from_frame_to_dnn failed\n");
+      return -1;
+   }
+
+   return 0;
+}
+
+static int _post_proc(DnnProcessingAsyncContext *ctx, AVFilterLink *outlink,
+                      DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p)
+{
+   AVFrame *frame_out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
+   if (!frame_out) {
+      av_log(ctx, AV_LOG_ERROR, "can't get video buffer from outlink\n");
+      return AVERROR(EINVAL);
+   }
+
+   av_frame_copy_props(frame_out, frame_in);
+
+   if (copy_from_dnn_to_frame(ctx, frame_out, model_output) != 0) {
+      av_log(ctx, AV_LOG_ERROR, "copy_from_dnn_to_frame failed\n");
+      av_frame_free(&frame_out);
+      return AVERROR(EINVAL);
+   }
+
+   if (isPlanarYUV(frame_in->format))
+      copy_uv_planes(ctx, frame_out, frame_in);
+
+   *frame_out_p = frame_out;
+
+   return 0;
+}
+
 static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, DnnInterface *dnn_interface)
 {
    if (!model_output || !frame_in || !frame_out_p || !dnn_interface)
@@ -119,26 +159,19 @@ static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_o
    DnnProcessingAsyncContext *ctx = filter_ctx->priv;
    AVFilterLink *outlink = filter_ctx->outputs[0];
 
-   AVFrame *frame_out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-   if (!frame_out) {
-      av_log(NULL, AV_LOG_ERROR, "can't get video buffer from outlink\n");
-      return AVERROR(EINVAL);
-   }
+   return _post_proc(ctx, outlink, model_output, frame_in, frame_out_p);
+}
 
-   av_frame_copy_props(frame_out, frame_in);
+static int post_proc2(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, UserData *user_data)
+{
+   if (!model_output || !frame_in || !frame_out_p || !user_data)
+      return -1; 
 
-   if (copy_from_dnn_to_frame(ctx, frame_out, model_output) != 0) {
-        av_log(NULL, AV_LOG_ERROR, "copy_from_dnn_to_frame failed\n");
-        av_frame_free(&frame_out);
-        return AVERROR(EINVAL);
-   }
+   AVFilterContext *filter_ctx = user_data->filter_ctx;
+   DnnProcessingAsyncContext *ctx = filter_ctx->priv;
+   AVFilterLink *outlink = filter_ctx->outputs[0];
 
-   if (isPlanarYUV(frame_in->format))
-        copy_uv_planes(ctx, frame_out, frame_in);
-
-   *frame_out_p = frame_out;
-
-   return 0;
+   return _post_proc(ctx, outlink, model_output, frame_in, frame_out_p);
 }
 
 AVFILTER_DEFINE_CLASS(dnn_processing_async);
@@ -167,36 +200,29 @@ static av_cold int init(AVFilterContext *context)
     param.async           = ctx->async;
     param.nireq           = ctx->nireq;
     param.batch_size      = ctx->batch_size;
-    param.backend_type    = DNN_OV; // FIXME: temp for testing
 
-    ctx->dnn_interface = dnn_interface_create(context->filter->name, &param, context);
-    av_log(ctx, AV_LOG_INFO, "async (%d), batch_size(%d), nireq(%d)\n", param.async, param.batch_size, param.nireq);
-
-    if (!ctx->dnn_interface) {
-        av_log(ctx, AV_LOG_ERROR, "Could not create dnn interface.\n");
+    ctx->dnn_module = ff_get_dnn_module(DNN_OV); // FIXME: temp for testing
+    if (!ctx->dnn_module) {
+        av_log(ctx, AV_LOG_ERROR, "could not create DNN module for requested backend\n");
+        return AVERROR(ENOMEM);
+    }
+    if (!ctx->dnn_module->load_model) {
+        av_log(ctx, AV_LOG_ERROR, "load_model for network is not specified\n");
         return AVERROR(EINVAL);
     }
 
-    dnn_interface_set_pre_proc(ctx->dnn_interface, (DNNPreProc)pre_proc);
-    dnn_interface_set_post_proc(ctx->dnn_interface, (DNNPostProc)post_proc);
+    UserData user_data = {};
+    user_data.param = param;
+    user_data.filter_ctx = context;
+    ctx->model = (ctx->dnn_module->load_model2)(ctx->model_filename, &user_data);
+    if (!ctx->model) {
+        av_log(ctx, AV_LOG_ERROR, "could not load DNN model\n");
+        return AVERROR(EINVAL);
+    }
 
+    ctx->model->pre_proc  = pre_proc2;
+    ctx->model->post_proc  = post_proc2;
     ctx->already_flushed = 0;
-
-    //ctx->dnn_module = ff_get_dnn_module(ctx->backend_type);
-    //if (!ctx->dnn_module) {
-    //    av_log(ctx, AV_LOG_ERROR, "could not create DNN module for requested backend\n");
-    //    return AVERROR(ENOMEM);
-    //}
-    //if (!ctx->dnn_module->load_model) {
-    //    av_log(ctx, AV_LOG_ERROR, "load_model for network is not specified\n");
-    //    return AVERROR(EINVAL);
-    //}
-
-    //ctx->model = (ctx->dnn_module->load_model)(ctx->model_filename);
-    //if (!ctx->model) {
-    //    av_log(ctx, AV_LOG_ERROR, "could not load DNN model\n");
-    //    return AVERROR(EINVAL);
-    //}
 
     return 0;
 }
@@ -291,7 +317,7 @@ static int config_input(AVFilterLink *inlink)
     DNNData model_input;
     int check;
 
-    result = ctx->dnn_interface->model->get_input(ctx->dnn_interface->model->model, &model_input, ctx->model_inputname);
+    result = ctx->model->get_input(ctx->model->model, &model_input, ctx->model_inputname);
     if (result != DNN_SUCCESS) {
         av_log(ctx, AV_LOG_ERROR, "could not get input from the model\n");
         return AVERROR(EIO);
@@ -302,18 +328,15 @@ static int config_input(AVFilterLink *inlink)
         return check;
     }
 
-    ctx->input.width    = inlink->w;
-    ctx->input.height   = inlink->h;
-    ctx->input.channels = model_input.channels;
-    ctx->input.dt = model_input.dt;
+    ctx->input = model_input;
 
-    result = (ctx->dnn_interface->model->set_input_output)(ctx->dnn_interface->model->model,
-                                                           &ctx->input, ctx->model_inputname,
-                                                           (const char **)&ctx->model_outputname, 1);
-    if (result != DNN_SUCCESS) {
-        av_log(ctx, AV_LOG_ERROR, "could not set input and output for the model\n");
-        return AVERROR(EIO);
-    }
+    //result = (ctx->dnn_interface->model->set_input_output)(ctx->dnn_interface->model->model,
+    //                                                       &ctx->input, ctx->model_inputname,
+    //                                                       (const char **)&ctx->model_outputname, 1);
+    //if (result != DNN_SUCCESS) {
+    //    av_log(ctx, AV_LOG_ERROR, "could not set input and output for the model\n");
+    //    return AVERROR(EIO);
+    //}
 
     return 0;
 }
@@ -398,9 +421,10 @@ static int config_output(AVFilterLink *outlink)
     DNNReturnType result;
 
     // have a try run in case that the dnn model resize the frame
-    result = (ctx->dnn_interface->dnn_module->execute_model)(ctx->dnn_interface->model, &ctx->output, 1);
+    //result = (ctx->dnn_interface->dnn_module->execute_model)(ctx->dnn_interface->model, &ctx->output, 1);
+    result = (ctx->model->get_output)(ctx->model->model, &ctx->output, ctx->model_outputname);
     if (result != DNN_SUCCESS){
-        av_log(ctx, AV_LOG_ERROR, "failed to execute model\n");
+        av_log(ctx, AV_LOG_ERROR, "failed to get model output %s's info\n", ctx->model_outputname);
         return AVERROR(EIO);
     }
 
@@ -542,11 +566,10 @@ static av_cold void uninit(AVFilterContext *ctx)
     sws_freeContext(context->sws_grayf32_to_gray8);
     sws_freeContext(context->sws_uv_scale);
 
-    dnn_interface_release(context->dnn_interface);
-    //if (context->dnn_module)
-    //    (context->dnn_module->free_model)(&context->model);
+    if (context->dnn_module)
+        (context->dnn_module->free_model)(&context->model);
 
-    //av_freep(&context->dnn_module);
+    av_freep(&context->dnn_module);
 }
 
 static int flush_frame(AVFilterContext *filter_ctx, AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
@@ -557,9 +580,9 @@ static int flush_frame(AVFilterContext *filter_ctx, AVFilterLink *outlink, int64
     if (ctx->already_flushed)
         return ret;
 
-    while (!dnn_interface_frame_queue_empty(ctx->dnn_interface)) {
+    while (!(ctx->dnn_module->frame_queue_empty)(ctx->model)) {
         AVFrame *output = NULL;
-        dnn_interface_get_frame(ctx->dnn_interface, &output);
+        (ctx->dnn_module->get_async_result)(ctx->model, &output);
         if (output) {
             if (outlink) {
                 ret = ff_filter_frame(outlink, output);
@@ -586,6 +609,7 @@ static int activate(AVFilterContext *filter_ctx)
     int64_t pts;
     int ret, status;
     int got_frame = 0;
+    DNNReturnType result;
 
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
 
@@ -595,12 +619,27 @@ static int activate(AVFilterContext *filter_ctx)
         ret = ff_inlink_consume_frame(inlink, &in);
         if (ret < 0)
             return ret;
-        if (ret > 0)
-            dnn_interface_send_frame(ctx->dnn_interface, in);
+        if (ret > 0) {
+           if (ctx->async) {
+              if ((ctx->dnn_module->execute_model_async2)(ctx->model, in, ctx->model_inputname, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
+                 return FFERROR_NOT_READY; // FIXME: return a more proper status to indicate the inference error? 
+           } else {
+              if ((ctx->dnn_module->execute_model2)(ctx->model, in, ctx->model_inputname, &output, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
+                 return FFERROR_NOT_READY; // FIXME: return a more proper status to indicate the inference error? 
+              if (output) {
+                 int ret_val = ff_filter_frame(outlink, output);
+                 if (ret_val < 0)
+                    return ret_val;
+                 got_frame = 1;
+                 output = NULL;
+              }
+           }
+        }
 
+        if (ctx->async) {
         // ret >= 0, drain all processed frames
         while (get_frame_status == 0) {
-            get_frame_status = dnn_interface_get_frame(ctx->dnn_interface, &output);
+            get_frame_status = (ctx->dnn_module->get_async_result)(ctx->model, &output);
             if (output) {
                 int ret_val = ff_filter_frame(outlink, output);
                 if (ret_val < 0)
@@ -609,6 +648,7 @@ static int activate(AVFilterContext *filter_ctx)
                 output = NULL;
             }
         };
+        }
     } while (ret > 0);
 
     // if frame got, schedule to next filter
