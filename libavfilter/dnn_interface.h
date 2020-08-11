@@ -31,6 +31,13 @@
 #include "avfilter.h"
 #include "dnn/ff_list.h"
 
+typedef enum {
+   DAST_FAIL = -2,        // something wrong
+   DAST_EMPTY_QUEUE = -1, // no more inference result to get
+   DAST_NOT_READY,        // all inferences are not finished
+   DAST_SUCCESS           // got a result frame successfully
+} DNNAsyncStatusType;
+
 typedef enum {DNN_SUCCESS, DNN_ERROR} DNNReturnType;
 
 typedef enum {DNN_NATIVE, DNN_TF, DNN_OV} DNNBackendType;
@@ -57,12 +64,12 @@ typedef void (*InferCallback)(DNNData *out_blob, ProcessingFrame *processing_fra
 // For dnn processing filter, it may generate a new frame and return it using frame_out_p.
 // For analytic filter, store the inference result as side data of frame_in and make the *frame_out_p to ref the frame_in.
 typedef int (*DNNPostProc)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, DnnInterface *dnn_interface);
-typedef int (*DNNPostProc2)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, UserData *user_data);
+typedef int (*DNNPostProc2)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, void *user_data);
 
 // model-specific pre proc function.
 // Convert and then copy the data in frame_in to model_input
 typedef int (*DNNPreProc)(AVFrame *frame_in, DNNData *model_input, DnnInterface *dnn_interface);
-typedef int (*DNNPreProc2)(AVFrame *frame_in, DNNData *model_input, UserData *user_data);
+typedef int (*DNNPreProc2)(AVFrame *frame_in, DNNData *model_input, void *user_data);
 
 typedef struct DNNModel{
     // Stores model that can be different for different backends.
@@ -95,13 +102,10 @@ typedef struct DNNModule{
     // Frees memory allocated for model.
     void (*free_model)(DNNModel **model);
 
-    DNNModel *(*load_model2)(const char *model_filename, UserData *user_data);
+    DNNModel *(*load_model2)(const char *model_filename, const char *options, void *user_data);
     DNNReturnType (*execute_model2)(const DNNModel *model, AVFrame *in, const char *model_input_name, AVFrame **out, const char **output_names, uint32_t nb_output);
     DNNReturnType (*execute_model_async2)(const DNNModel *model, AVFrame *in, const char *model_input_name, const char **output_names, uint32_t nb_output);
-    // return == 0: got a async result successfully, and can try to get next one.
-    // return != 0: async result is not ready.
-    int (*get_async_result)(const DNNModel *model, AVFrame **out);
-    int (*frame_queue_empty)(const DNNModel *model);
+    DNNAsyncStatusType (*get_async_result)(const DNNModel *model, AVFrame **out);
 
 } DNNModule;
 

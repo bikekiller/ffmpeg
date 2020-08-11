@@ -68,7 +68,6 @@ DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
         dnn_module->execute_model2 = &ff_dnn_execute_model_2_ov;
         dnn_module->execute_model_async2 = &ff_dnn_execute_model_async_2_ov;
         dnn_module->get_async_result = &ff_dnn_get_async_result_ov;
-        dnn_module->frame_queue_empty = &ff_dnn_frame_queue_empty_ov;
     #else
         av_freep(&dnn_module);
         return NULL;

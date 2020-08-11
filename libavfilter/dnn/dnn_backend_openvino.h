@@ -37,7 +37,7 @@ DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, InferenceCont
 
 DNNReturnType ff_dnn_execute_model_sync_ov(const DNNModel *model, InferenceContext *inference_ctx, const char *blob_name);
 
-DNNModel *ff_dnn_load_model_2_ov(const char *model_filename, UserData *user_data);
+DNNModel *ff_dnn_load_model_2_ov(const char *model_filename, const char *options, void *user_data);
 
 DNNReturnType ff_dnn_execute_model_2_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,
                                         AVFrame **out, const char **output_names, uint32_t nb_output);
@@ -45,9 +45,7 @@ DNNReturnType ff_dnn_execute_model_2_ov(const DNNModel *model, AVFrame *in, cons
 DNNReturnType ff_dnn_execute_model_async_2_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,
                                               const char **output_names, uint32_t nb_output);
 
-int ff_dnn_get_async_result_ov(const DNNModel *model, AVFrame **out);
-
-int ff_dnn_frame_queue_empty_ov(const DNNModel *model);
+DNNAsyncStatusType ff_dnn_get_async_result_ov(const DNNModel *model, AVFrame **out);
 
 void ff_dnn_free_model_ov(DNNModel **model);
 
