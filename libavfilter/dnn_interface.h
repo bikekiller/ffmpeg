@@ -50,17 +50,12 @@ typedef struct DNNData{
     int width, height, channels, batch_size;
 } DNNData;
 
-typedef struct __ProcessingFrame {
-    AVFrame *frame_in;
-    AVFrame *frame_out;
-    int inference_done;
-} ProcessingFrame;
-
 // model-specific post proc function.
 // Parse inference result and store the result in frame_in and frame_out_p
 // For dnn processing filter, it may generate a new frame and return it using frame_out_p.
 // For analytic filter, store the inference result as side data of frame_in and make the *frame_out_p to ref the frame_in.
 typedef int (*DNNPostProc)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, void *user_data);
+
 // model-specific pre proc function.
 // Convert and then copy the data in frame_in to model_input
 typedef int (*DNNPreProc)(AVFrame *frame_in, DNNData *model_input, void *user_data);
@@ -78,10 +73,8 @@ typedef struct DNNModel{
     // Sets model input and output.
     // Should be called at least once before model execution.
     DNNReturnType (*set_input_output)(void *model, DNNData *input, const char *input_name, const char **output_names, uint32_t nb_output);
-
     // Gets info of specified output
     DNNReturnType (*get_output)(void *model, DNNData *output, const char *output_name);
-
     DNNPreProc pre_proc;
     DNNPostProc post_proc;
 } DNNModel;
@@ -94,20 +87,15 @@ typedef struct DNNModule{
     DNNReturnType (*execute_model)(const DNNModel *model, DNNData *outputs, uint32_t nb_output);
     // Frees memory allocated for model.
     void (*free_model)(DNNModel **model);
-
     DNNModel *(*load_model2)(const char *model_filename, const char *options, void *user_data);
     DNNReturnType (*execute_model2)(const DNNModel *model, AVFrame *in, const char *model_input_name, AVFrame **out, const char **output_names, uint32_t nb_output);
     // Executes model asynchronously. Release inference_ctx when execution done
-    DNNReturnType (*execute_model_async_batch)(const DNNModel *model, AVFrame *in, const char *model_input_name,
-                                               const char **output_names, uint32_t nb_output);
+    DNNReturnType (*execute_model_async)(const DNNModel *model, AVFrame *in, const char *model_input_name, const char **output_names, uint32_t nb_output);
     void (*flush)(const DNNModel *model);
     DNNAsyncStatusType (*get_async_result)(const DNNModel *model, AVFrame **out);
-
 } DNNModule;
 
 // Initializes DNNModule depending on chosen backend.
 DNNModule *ff_get_dnn_module(DNNBackendType backend_type);
-
-
 
 #endif

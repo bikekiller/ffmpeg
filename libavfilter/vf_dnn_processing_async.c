@@ -589,12 +589,11 @@ static int activate(AVFilterContext *filter_ctx)
             return ret;
         if (ret > 0) {
            if (ctx->async) {
-              //if ((ctx->dnn_module->execute_model_async2)(ctx->model, in, ctx->model_inputname, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
-              if ((ctx->dnn_module->execute_model_async_batch)(ctx->model, in, ctx->model_inputname, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
+              if ((ctx->dnn_module->execute_model_async)(ctx->model, in, ctx->model_inputname, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
                  return FFERROR_NOT_READY; // FIXME: return a more proper status to indicate the inference error? 
            } else {
               if ((ctx->dnn_module->execute_model2)(ctx->model, in, ctx->model_inputname, &output, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
-                 return FFERROR_NOT_READY; // FIXME: return a more proper status to indicate the inference error? 
+                 return FFERROR_NOT_READY;
               if (output) {
                  int ret_val = ff_filter_frame(outlink, output);
                  if (ret_val < 0)
@@ -606,7 +605,7 @@ static int activate(AVFilterContext *filter_ctx)
         }
 
         if (ctx->async) {
-        // ret >= 0, drain all processed frames
+        // drain all processed frames
         do {
             async_state = (ctx->dnn_module->get_async_result)(ctx->model, &output);
             av_log(filter_ctx, AV_LOG_INFO, "async state : %d.\n", async_state);

@@ -31,6 +31,13 @@
 #include <pthread.h>
 
 #define DEFAULT_BATCH_SIZE (4)
+
+typedef struct ProcessingFrame {
+    AVFrame *frame_in;
+    AVFrame *frame_out;
+    int inference_done;
+} ProcessingFrame;
+
 typedef struct RequestContext {
     char *blob_name;
     ie_infer_request_t *infer_request;
@@ -708,7 +715,7 @@ void ff_dnn_flush_ov(const DNNModel *model)
    ie_infer_request_infer_async(request_ctx->infer_request);
 }
 
-DNNReturnType ff_dnn_execute_model_async_batch_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,
+DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,
                                                   const char **output_names, uint32_t nb_output)
 {
     DNNData input_blob, new_blob;
