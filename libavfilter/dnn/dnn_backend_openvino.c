@@ -463,7 +463,7 @@ static void completion_callback_batch_infer(void *args) {
     for (int b = 0; b < request->num_processing_frames; b++) {
        _new_blob_by_batch_idx(ov_model, &output, &new_blob, b);
        processing_frame = request->processing_frame_array[b];
-       if (((DNNPostProc2)model->post_proc)(&new_blob, processing_frame->frame_in, &processing_frame->frame_out, ov_model->user_data) != 0) {
+       if (((DNNPostProc)model->post_proc)(&new_blob, processing_frame->frame_in, &processing_frame->frame_out, ov_model->user_data) != 0) {
           av_log(NULL, AV_LOG_ERROR, "post_proc failed\n");
           goto out;
        }
@@ -494,97 +494,6 @@ static void completion_callback_batch_infer(void *args) {
     }
     request->num_processing_frames = 0;
     // give back the request resource
-    SafeQueuePush(ov_model->request_ctx_q, request);
-
-out:
-    av_free(blob_name);
-    if (out_blob)
-        ie_blob_free(&out_blob);
-    pthread_mutex_unlock(&ov_model->callback_mutex);
-}
-
-static void completion_callback2(void *args) {
-
-    RequestContext *request = (RequestContext *)args;
-    ProcessingFrame *processing_frame = request->processing_frame;
-    DNNModel *model = (DNNModel*)request->model;
-    OVModel *ov_model = (OVModel*)model->model;
-    dimensions_t dims;
-    precision_e precision;
-    IEStatusCode status;
-    char *blob_name;
-    ie_blob_t *out_blob;
-    ie_blob_buffer_t blob_buffer;
-    DNNData output;
-    ff_list_t *processing_frames;
-    ff_list_t *processed;
-
-    pthread_mutex_lock(&ov_model->callback_mutex);
-
-    // get output blob
-    if (request->blob_name)
-       blob_name = av_strdup(request->blob_name);
-    else {
-       // defaultly return the first output blob
-       ie_network_get_output_name(ov_model->network, 0, &blob_name);
-    }
-
-    ie_infer_request_get_blob(request->infer_request, blob_name, &out_blob);
-    if (!out_blob) {
-       av_log(NULL, AV_LOG_ERROR, "failed to get out blob\n");
-       goto out;
-    }
-
-    status = ie_blob_get_buffer(out_blob, &blob_buffer);
-    if (status != OK) {
-        av_log(NULL, AV_LOG_ERROR, "failed to get buffer\n");
-        goto out;
-    }
-
-    status |= ie_blob_get_dims(out_blob, &dims);
-    status |= ie_blob_get_precision(out_blob, &precision);
-    if (status != OK) {
-        av_log(NULL, AV_LOG_ERROR, "failed to get precision or dims\n");
-        goto out;
-    }
-
-    // output blob to DNNData 
-    output.channels = dims.dims[1];
-    output.height   = dims.dims[2];
-    output.width    = dims.dims[3];
-    output.dt       = precision_to_datatype(precision);
-    output.data     = blob_buffer.buffer;
-
-    // model-specific post proc: DNNData to AVFrame, 
-    if (((DNNPostProc2)model->post_proc)(&output, processing_frame->frame_in, &processing_frame->frame_out, ov_model->user_data) != 0) {
-       av_log(NULL, AV_LOG_ERROR, "post_proc failed\n");
-       goto out;
-    }
-
-    // mark done
-    processing_frame->inference_done = 1;
-
-    // enqueue processed frame queue
-    pthread_mutex_lock(&ov_model->frame_q_mutex);
-    processing_frames = ov_model->processing_frames;
-    processed = ov_model->processed_frames;
-
-    while (!processing_frames->empty(processing_frames)) {
-        ProcessingFrame *front = (ProcessingFrame *)processing_frames->front(processing_frames);
-        if (!front->inference_done) {
-            break; // inference not completed yet
-        }
-        processed->push_back(processed, front->frame_out);
-        processing_frames->pop_front(processing_frames);
-        av_free(front);
-    }
-    pthread_mutex_unlock(&ov_model->frame_q_mutex);
-
-    // give back the request resource
-    if (request->blob_name) {
-       av_free(request->blob_name);
-       request->blob_name = NULL;
-    }
     SafeQueuePush(ov_model->request_ctx_q, request);
 
 out:
@@ -738,12 +647,12 @@ DNNReturnType ff_dnn_execute_model_2_ov(const DNNModel *model, AVFrame *in, cons
       av_log(NULL, AV_LOG_ERROR, "pre_proc function not specified\n");
       return AVERROR(EINVAL);
    }
-   ((DNNPreProc2)(model->pre_proc))(in, &input_blob, ov_model->user_data);
+   ((DNNPreProc)(model->pre_proc))(in, &input_blob, ov_model->user_data);
 
    if (DNN_SUCCESS != _ff_dnn_execute_model_ov(ov_model, &output, output_names[0]))
       return AVERROR(EINVAL);
 
-   return ((DNNPostProc2)model->post_proc)(&output, in, out, ov_model->user_data);
+   return ((DNNPostProc)model->post_proc)(&output, in, out, ov_model->user_data);
 }
 
 void _new_blob_by_batch_idx(OVModel *ov_model, DNNData *input_blob, DNNData *new_blob, const int batch_idx)
@@ -827,7 +736,7 @@ DNNReturnType ff_dnn_execute_model_async_batch_ov(const DNNModel *model, AVFrame
         return AVERROR(EINVAL);
     }
 
-    ((DNNPreProc2)(model->pre_proc))(in, &new_blob, ov_model->user_data);
+    ((DNNPreProc)(model->pre_proc))(in, &new_blob, ov_model->user_data);
 
     _create_and_enqueue_processing_frame(ov_model, in, request_ctx);
 

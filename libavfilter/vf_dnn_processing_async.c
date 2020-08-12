@@ -87,7 +87,7 @@ static const AVOption dnn_processing_async_options[] = {
     { NULL }
 };
 
-static int pre_proc2(AVFrame *frame_in, DNNData *model_input, void *user_data)
+static int pre_proc(AVFrame *frame_in, DNNData *model_input, void *user_data)
 {
    DnnProcessingAsyncContext *ctx;
 
@@ -129,7 +129,7 @@ static int _post_proc(DnnProcessingAsyncContext *ctx, AVFilterLink *outlink,
    return 0;
 }
 
-static int post_proc2(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, void *user_data)
+static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, void *user_data)
 {
    AVFilterContext *filter_ctx;
    DnnProcessingAsyncContext *ctx;
@@ -175,21 +175,14 @@ static av_cold int init(AVFilterContext *context)
     }
 
     // FIXME: pass in the param when loading model
-    //InferenceParam param = { };
-    //param.model_filename  = ctx->model_filename;
-    //param.model_inputname = ctx->model_inputname;
-    //param.model_outputname = ctx->model_outputname;
-    //param.async           = ctx->async;
-    //param.nireq           = ctx->nireq;
-    //param.batch_size      = ctx->batch_size;
     ctx->model = (ctx->dnn_module->load_model2)(ctx->model_filename, NULL, context);
     if (!ctx->model) {
         av_log(ctx, AV_LOG_ERROR, "could not load DNN model\n");
         return AVERROR(EINVAL);
     }
 
-    ctx->model->pre_proc  = pre_proc2;
-    ctx->model->post_proc  = post_proc2;
+    ctx->model->pre_proc  = pre_proc;
+    ctx->model->post_proc  = post_proc;
     ctx->already_flushed = 0;
 
     return 0;
@@ -388,8 +381,6 @@ static int config_output(AVFilterLink *outlink)
     DnnProcessingAsyncContext *ctx = context->priv;
     DNNReturnType result;
 
-    // have a try run in case that the dnn model resize the frame
-    //result = (ctx->dnn_interface->dnn_module->execute_model)(ctx->dnn_interface->model, &ctx->output, 1);
     result = (ctx->model->get_output)(ctx->model->model, &ctx->output, ctx->model_outputname);
     if (result != DNN_SUCCESS){
         av_log(ctx, AV_LOG_ERROR, "failed to get model output %s's info\n", ctx->model_outputname);

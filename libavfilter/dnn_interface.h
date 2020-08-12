@@ -50,17 +50,20 @@ typedef struct DNNData{
     int width, height, channels, batch_size;
 } DNNData;
 
-typedef struct __ProcessingFrame ProcessingFrame;
+typedef struct __ProcessingFrame {
+    AVFrame *frame_in;
+    AVFrame *frame_out;
+    int inference_done;
+} ProcessingFrame;
 
 // model-specific post proc function.
 // Parse inference result and store the result in frame_in and frame_out_p
 // For dnn processing filter, it may generate a new frame and return it using frame_out_p.
 // For analytic filter, store the inference result as side data of frame_in and make the *frame_out_p to ref the frame_in.
-typedef int (*DNNPostProc2)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, void *user_data);
-
+typedef int (*DNNPostProc)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, void *user_data);
 // model-specific pre proc function.
 // Convert and then copy the data in frame_in to model_input
-typedef int (*DNNPreProc2)(AVFrame *frame_in, DNNData *model_input, void *user_data);
+typedef int (*DNNPreProc)(AVFrame *frame_in, DNNData *model_input, void *user_data);
 
 typedef struct DNNModel{
     // Stores model that can be different for different backends.
@@ -76,10 +79,11 @@ typedef struct DNNModel{
     // Should be called at least once before model execution.
     DNNReturnType (*set_input_output)(void *model, DNNData *input, const char *input_name, const char **output_names, uint32_t nb_output);
 
+    // Gets info of specified output
     DNNReturnType (*get_output)(void *model, DNNData *output, const char *output_name);
-    DNNPreProc2 pre_proc;
-    DNNPostProc2 post_proc;
-    AVFilterContext *filter_ctx;
+
+    DNNPreProc pre_proc;
+    DNNPostProc post_proc;
 } DNNModel;
 
 // Stores pointers to functions for loading, executing, freeing DNN models for one of the backends.
@@ -104,10 +108,6 @@ typedef struct DNNModule{
 // Initializes DNNModule depending on chosen backend.
 DNNModule *ff_get_dnn_module(DNNBackendType backend_type);
 
-struct __ProcessingFrame {
-    AVFrame *frame_in;
-    AVFrame *frame_out;
-    int inference_done;
-};
+
 
 #endif
