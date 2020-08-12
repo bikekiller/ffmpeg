@@ -851,59 +851,6 @@ DNNReturnType ff_dnn_execute_model_async_batch_ov(const DNNModel *model, AVFrame
     return DNN_SUCCESS;
 }
 
-DNNReturnType ff_dnn_execute_model_async_2_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,
-                                              const char **output_names, uint32_t nb_output)
-{
-    DNNData input_blob;
-    OVModel *ov_model;
-    ProcessingFrame *processing_frame;
-    RequestContext *request_ctx;
-
-    // FIXME: to support more than 1 output?
-    av_assert0(nb_output == 1);
-
-    if (!model || !in)
-        return AVERROR(EINVAL);
-
-    ov_model = (OVModel *)model->model;
-
-    // preproc
-    (model->get_input_blob)(model->model, &input_blob, model_input_name);
-
-    if(!model->pre_proc) {
-        av_log(NULL, AV_LOG_ERROR, "pre_proc function not specified\n");
-        return AVERROR(EINVAL);
-    }
-
-    ((DNNPreProc2)(model->pre_proc))(in, &input_blob, ov_model->user_data);
-
-    // create a ProcessingFrame instance and push it into processing_frames queue
-    pthread_mutex_lock(&ov_model->frame_q_mutex);
-    processing_frame = (ProcessingFrame *)av_malloc(sizeof(ProcessingFrame)); // release in PushOutput()
-    if (processing_frame == NULL) {
-       pthread_mutex_unlock(&ov_model->frame_q_mutex);
-       return AVERROR(EINVAL);
-    }
-    processing_frame->frame_in = in;
-    processing_frame->frame_out = NULL;
-    processing_frame->inference_done = 0;
-    ov_model->processing_frames->push_back(ov_model->processing_frames, processing_frame);
-    pthread_mutex_unlock(&ov_model->frame_q_mutex);
-
-    // async inference
-    request_ctx = (RequestContext *)SafeQueuePop(ov_model->request_ctx_q);
-    request_ctx->processing_frame = processing_frame;
-    request_ctx->blob_name = output_names[0] ? av_strdup(output_names[0]) : NULL;
-    request_ctx->model = model;
-    request_ctx->callback.completeCallBackFunc = completion_callback2;
-    request_ctx->callback.args = request_ctx;
-
-    ie_infer_set_completion_callback(request_ctx->infer_request, &request_ctx->callback);
-    ie_infer_request_infer_async(request_ctx->infer_request);
-
-    return DNN_SUCCESS;
-}
-
 DNNAsyncStatusType ff_dnn_get_async_result_ov(const DNNModel *model, AVFrame **out)
 {
     OVModel *ov_model;
