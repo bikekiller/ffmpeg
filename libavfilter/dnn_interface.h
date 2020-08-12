@@ -68,8 +68,6 @@ typedef struct DNNModel{
     // Gets model input information
     // Just reuse struct DNNData here, actually the DNNData.data field is not needed.
     DNNReturnType (*get_input)(void *model, DNNData *input, const char *input_name);
-    // Gets model input blob, DNNData.data is needed to copy input data into model
-    DNNReturnType (*get_input_blob)(void *model, DNNData *input, const char *input_name);
     // Sets model input and output.
     // Should be called at least once before model execution.
     DNNReturnType (*set_input_output)(void *model, DNNData *input, const char *input_name, const char **output_names, uint32_t nb_output);
