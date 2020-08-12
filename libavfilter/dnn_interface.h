@@ -47,7 +47,7 @@ typedef enum {DNN_FLOAT = 1, DNN_UINT8 = 4} DNNDataType;
 typedef struct DNNData{
     void *data;
     DNNDataType dt;
-    int width, height, channels;
+    int width, height, channels, batch_size;
 } DNNData;
 
 typedef struct __DnnInterface DnnInterface;
@@ -105,6 +105,9 @@ typedef struct DNNModule{
     DNNModel *(*load_model2)(const char *model_filename, const char *options, void *user_data);
     DNNReturnType (*execute_model2)(const DNNModel *model, AVFrame *in, const char *model_input_name, AVFrame **out, const char **output_names, uint32_t nb_output);
     DNNReturnType (*execute_model_async2)(const DNNModel *model, AVFrame *in, const char *model_input_name, const char **output_names, uint32_t nb_output);
+    DNNReturnType (*execute_model_async_batch)(const DNNModel *model, AVFrame *in, const char *model_input_name,
+                                               const char **output_names, uint32_t nb_output);
+    void (*flush)(const DNNModel *model);
     DNNAsyncStatusType (*get_async_result)(const DNNModel *model, AVFrame **out);
 
 } DNNModule;

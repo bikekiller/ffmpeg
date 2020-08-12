@@ -91,11 +91,12 @@ static const AVOption dnn_processing_async_options[] = {
 static int pre_proc(AVFrame *frame_in, DNNData *model_input, DnnInterface *dnn_interface)
 {
    DNNData *input;
+   DnnProcessingAsyncContext *ctx;
 
    if (!frame_in || !dnn_interface)
       return -1;
 
-   DnnProcessingAsyncContext *ctx = (DnnProcessingAsyncContext *)dnn_interface->filter_ctx->priv;
+   ctx = (DnnProcessingAsyncContext *)dnn_interface->filter_ctx->priv;
 
    if (dnn_interface->async_run)
       input = model_input;
@@ -112,10 +113,12 @@ static int pre_proc(AVFrame *frame_in, DNNData *model_input, DnnInterface *dnn_i
 
 static int pre_proc2(AVFrame *frame_in, DNNData *model_input, void *user_data)
 {
+   DnnProcessingAsyncContext *ctx;
+
    if (!frame_in || !model_input || !user_data)
       return -1;
 
-   DnnProcessingAsyncContext *ctx = (DnnProcessingAsyncContext *)((AVFilterContext *)user_data)->priv;
+   ctx = (DnnProcessingAsyncContext *)((AVFilterContext *)user_data)->priv;
 
    if (copy_from_frame_to_dnn(ctx, frame_in, model_input) != 0) {
       av_log(ctx, AV_LOG_ERROR, "copy_from_frame_to_dnn failed\n");
@@ -152,24 +155,32 @@ static int _post_proc(DnnProcessingAsyncContext *ctx, AVFilterLink *outlink,
 
 static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, DnnInterface *dnn_interface)
 {
+   AVFilterContext *filter_ctx;
+   DnnProcessingAsyncContext *ctx;
+   AVFilterLink *outlink;
+
    if (!model_output || !frame_in || !frame_out_p || !dnn_interface)
       return -1; 
 
-   AVFilterContext *filter_ctx = dnn_interface->filter_ctx;
-   DnnProcessingAsyncContext *ctx = filter_ctx->priv;
-   AVFilterLink *outlink = filter_ctx->outputs[0];
+   filter_ctx = dnn_interface->filter_ctx;
+   ctx = filter_ctx->priv;
+   outlink = filter_ctx->outputs[0];
 
    return _post_proc(ctx, outlink, model_output, frame_in, frame_out_p);
 }
 
 static int post_proc2(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, void *user_data)
 {
+   AVFilterContext *filter_ctx;
+   DnnProcessingAsyncContext *ctx;
+   AVFilterLink *outlink;
+
    if (!model_output || !frame_in || !frame_out_p || !user_data)
       return -1; 
 
-   AVFilterContext *filter_ctx = (AVFilterContext *)user_data;
-   DnnProcessingAsyncContext *ctx = filter_ctx->priv;
-   AVFilterLink *outlink = filter_ctx->outputs[0];
+   filter_ctx = (AVFilterContext *)user_data;
+   ctx = filter_ctx->priv;
+   outlink = filter_ctx->outputs[0];
 
    return _post_proc(ctx, outlink, model_output, frame_in, frame_out_p);
 }
@@ -573,16 +584,18 @@ static int flush_frame(AVFilterContext *filter_ctx, AVFilterLink *outlink, int64
 {
     int ret = 0;
     DnnProcessingAsyncContext *ctx = filter_ctx->priv;
+    int async_state;
+    AVFrame *output;
 
     if (ctx->already_flushed)
         return ret;
 
-    int async_state = DAST_SUCCESS;
-    AVFrame *output = NULL;
+    async_state = DAST_SUCCESS;
+    output = NULL;
 
     do {
        async_state = (ctx->dnn_module->get_async_result)(ctx->model, &output);
-       if (output) {
+       if ((async_state == DAST_SUCCESS) && output) {
           if (outlink) {
              ret = ff_filter_frame(outlink, output);
              if (out_pts)
@@ -593,12 +606,15 @@ static int flush_frame(AVFilterContext *filter_ctx, AVFilterLink *outlink, int64
           output = NULL;
        }
 
-       if (async_state == DAST_NOT_READY)
-          av_usleep(5000);
+       if (async_state == DAST_NOT_READY && !ctx->already_flushed) {
+          (ctx->dnn_module->flush)(ctx->model);
+          ctx->already_flushed = 1;
+       }
+
+       av_usleep(5000);
 
     } while (async_state >= DAST_NOT_READY);
 
-    ctx->already_flushed = 1;
     return ret;
 }
 
@@ -611,7 +627,6 @@ static int activate(AVFilterContext *filter_ctx)
     int64_t pts;
     int ret, status;
     int got_frame = 0;
-    DNNReturnType result;
 
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
 
@@ -623,7 +638,8 @@ static int activate(AVFilterContext *filter_ctx)
             return ret;
         if (ret > 0) {
            if (ctx->async) {
-              if ((ctx->dnn_module->execute_model_async2)(ctx->model, in, ctx->model_inputname, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
+              //if ((ctx->dnn_module->execute_model_async2)(ctx->model, in, ctx->model_inputname, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
+              if ((ctx->dnn_module->execute_model_async_batch)(ctx->model, in, ctx->model_inputname, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
                  return FFERROR_NOT_READY; // FIXME: return a more proper status to indicate the inference error? 
            } else {
               if ((ctx->dnn_module->execute_model2)(ctx->model, in, ctx->model_inputname, &output, (const char **)&ctx->model_outputname, 1) != DNN_SUCCESS)
@@ -642,6 +658,7 @@ static int activate(AVFilterContext *filter_ctx)
         // ret >= 0, drain all processed frames
         do {
             async_state = (ctx->dnn_module->get_async_result)(ctx->model, &output);
+            av_log(filter_ctx, AV_LOG_INFO, "async state : %d.\n", async_state);
             if (output) {
                 int ret_val = ff_filter_frame(outlink, output);
                 if (ret_val < 0)

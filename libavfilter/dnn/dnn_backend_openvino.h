@@ -45,6 +45,11 @@ DNNReturnType ff_dnn_execute_model_2_ov(const DNNModel *model, AVFrame *in, cons
 DNNReturnType ff_dnn_execute_model_async_2_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,
                                               const char **output_names, uint32_t nb_output);
 
+DNNReturnType ff_dnn_execute_model_async_batch_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,
+                                                  const char **output_names, uint32_t nb_output);
+
+void ff_dnn_flush_ov(const DNNModel *model);
+
 DNNAsyncStatusType ff_dnn_get_async_result_ov(const DNNModel *model, AVFrame **out);
 
 void ff_dnn_free_model_ov(DNNModel **model);
