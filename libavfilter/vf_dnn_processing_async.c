@@ -88,29 +88,6 @@ static const AVOption dnn_processing_async_options[] = {
     { NULL }
 };
 
-static int pre_proc(AVFrame *frame_in, DNNData *model_input, DnnInterface *dnn_interface)
-{
-   DNNData *input;
-   DnnProcessingAsyncContext *ctx;
-
-   if (!frame_in || !dnn_interface)
-      return -1;
-
-   ctx = (DnnProcessingAsyncContext *)dnn_interface->filter_ctx->priv;
-
-   if (dnn_interface->async_run)
-      input = model_input;
-   else
-      input = &ctx->input;
-
-   if (copy_from_frame_to_dnn(ctx, frame_in, input) != 0) {
-      av_log(ctx, AV_LOG_ERROR, "copy_from_frame_to_dnn failed\n");
-      return -1;
-   }
-
-   return 0;
-}
-
 static int pre_proc2(AVFrame *frame_in, DNNData *model_input, void *user_data)
 {
    DnnProcessingAsyncContext *ctx;
@@ -151,22 +128,6 @@ static int _post_proc(DnnProcessingAsyncContext *ctx, AVFilterLink *outlink,
    *frame_out_p = frame_out;
 
    return 0;
-}
-
-static int post_proc(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, DnnInterface *dnn_interface)
-{
-   AVFilterContext *filter_ctx;
-   DnnProcessingAsyncContext *ctx;
-   AVFilterLink *outlink;
-
-   if (!model_output || !frame_in || !frame_out_p || !dnn_interface)
-      return -1; 
-
-   filter_ctx = dnn_interface->filter_ctx;
-   ctx = filter_ctx->priv;
-   outlink = filter_ctx->outputs[0];
-
-   return _post_proc(ctx, outlink, model_output, frame_in, frame_out_p);
 }
 
 static int post_proc2(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, void *user_data)

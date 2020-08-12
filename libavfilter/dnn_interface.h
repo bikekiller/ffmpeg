@@ -159,18 +159,4 @@ struct __DnnInterface {
     ff_list_t *processed_frames;
 };
 
-DnnInterface *dnn_interface_create(const char *inference_id, InferenceParam *param, AVFilterContext *filter_ctx);
-
-void dnn_interface_set_pre_proc(DnnInterface *dnn_interface, DNNPreProc pre_proc);
-
-void dnn_interface_set_post_proc(DnnInterface *dnn_interface, DNNPostProc post_proc);
-
-void dnn_interface_release(DnnInterface *dnn_interface);
-
-int dnn_interface_send_frame(DnnInterface *dnn_interface, AVFrame *frame_in);
-
-int dnn_interface_get_frame(DnnInterface *dnn_interface, AVFrame **frame_out);
-
-int dnn_interface_frame_queue_empty(DnnInterface *dnn_interface);
-
 #endif
