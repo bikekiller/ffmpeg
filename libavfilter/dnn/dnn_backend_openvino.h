@@ -33,10 +33,6 @@ DNNModel *ff_dnn_load_model_ov(const char *model_filename, const char *options);
 
 DNNReturnType ff_dnn_execute_model_ov(const DNNModel *model, DNNData *outputs, uint32_t nb_output);
 
-DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, InferenceContext *inference_ctx, const char *blob_name);
-
-DNNReturnType ff_dnn_execute_model_sync_ov(const DNNModel *model, InferenceContext *inference_ctx, const char *blob_name);
-
 DNNModel *ff_dnn_load_model_2_ov(const char *model_filename, const char *options, void *user_data);
 
 DNNReturnType ff_dnn_execute_model_2_ov(const DNNModel *model, AVFrame *in, const char *model_input_name,

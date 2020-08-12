@@ -44,7 +44,6 @@ typedef struct DnnProcessingAsyncContext {
     char *model_inputname;
     char *model_outputname;
 
-    DnnInterface *dnn_interface;
     DNNModule *dnn_module;
     DNNModel *model;
 

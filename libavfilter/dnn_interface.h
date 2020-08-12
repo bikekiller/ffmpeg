@@ -50,25 +50,16 @@ typedef struct DNNData{
     int width, height, channels, batch_size;
 } DNNData;
 
-typedef struct __DnnInterface DnnInterface;
-typedef struct __InferenceParam InferenceParam;
-typedef struct __InferenceContext InferenceContext;
 typedef struct __ProcessingFrame ProcessingFrame;
-typedef struct __UserData UserData;
-
-// callback to call model-specific post proc and update the internal frame queue
-typedef void (*InferCallback)(DNNData *out_blob, ProcessingFrame *processing_frame, DnnInterface *dnn_interface);
 
 // model-specific post proc function.
 // Parse inference result and store the result in frame_in and frame_out_p
 // For dnn processing filter, it may generate a new frame and return it using frame_out_p.
 // For analytic filter, store the inference result as side data of frame_in and make the *frame_out_p to ref the frame_in.
-typedef int (*DNNPostProc)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, DnnInterface *dnn_interface);
 typedef int (*DNNPostProc2)(DNNData *model_output, AVFrame *frame_in, AVFrame **frame_out_p, void *user_data);
 
 // model-specific pre proc function.
 // Convert and then copy the data in frame_in to model_input
-typedef int (*DNNPreProc)(AVFrame *frame_in, DNNData *model_input, DnnInterface *dnn_interface);
 typedef int (*DNNPreProc2)(AVFrame *frame_in, DNNData *model_input, void *user_data);
 
 typedef struct DNNModel{
@@ -97,13 +88,12 @@ typedef struct DNNModule{
     DNNModel *(*load_model)(const char *model_filename, const char *options);
     // Executes model with specified input and output. Returns DNN_ERROR otherwise.
     DNNReturnType (*execute_model)(const DNNModel *model, DNNData *outputs, uint32_t nb_output);
-    // Executes model asynchronously. Release inference_ctx when execution done
-    DNNReturnType (*execute_model_async)(const DNNModel *model, InferenceContext *inference_ctx, const char *output_name);
     // Frees memory allocated for model.
     void (*free_model)(DNNModel **model);
 
     DNNModel *(*load_model2)(const char *model_filename, const char *options, void *user_data);
     DNNReturnType (*execute_model2)(const DNNModel *model, AVFrame *in, const char *model_input_name, AVFrame **out, const char **output_names, uint32_t nb_output);
+    // Executes model asynchronously. Release inference_ctx when execution done
     DNNReturnType (*execute_model_async2)(const DNNModel *model, AVFrame *in, const char *model_input_name, const char **output_names, uint32_t nb_output);
     DNNReturnType (*execute_model_async_batch)(const DNNModel *model, AVFrame *in, const char *model_input_name,
                                                const char **output_names, uint32_t nb_output);
@@ -119,44 +109,6 @@ struct __ProcessingFrame {
     AVFrame *frame_in;
     AVFrame *frame_out;
     int inference_done;
-};
-
-struct __InferenceContext{
-   ProcessingFrame *processing_frame;
-   InferCallback cb;
-   DnnInterface *dnn_interface;
-};
-
-struct __InferenceParam {
-    char *model_filename;                                                                                                       
-    char *model_inputname;
-    char *model_outputname;
-    int async;
-    int nireq;
-    int batch_size;                                                                                                    
-    int backend_type;                                                                                                    
-};
-
-struct __UserData{
-   InferenceParam param;
-   AVFilterContext *filter_ctx;
-};
-
-struct __DnnInterface {
-    AVFilterContext *filter_ctx;
-    // unique infer string id
-    const char *inference_id;
-    DNNModule *dnn_module;
-    DNNModel *model;
-
-    InferenceParam param;
-    int async_run;
-    DNNPreProc pre_proc;         // type: PreProcFunction
-    DNNPostProc post_proc;        // type: PostProcFunction
-
-    pthread_mutex_t frame_q_mutex;
-    ff_list_t *processing_frames;
-    ff_list_t *processed_frames;
 };
 
 #endif

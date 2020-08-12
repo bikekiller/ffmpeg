@@ -63,7 +63,6 @@ DNNModule *ff_get_dnn_module(DNNBackendType backend_type)
         dnn_module->load_model = &ff_dnn_load_model_ov;
         dnn_module->execute_model = &ff_dnn_execute_model_ov;
         dnn_module->free_model = &ff_dnn_free_model_ov;
-        dnn_module->execute_model_async = &ff_dnn_execute_model_async_ov;
         dnn_module->load_model2 = &ff_dnn_load_model_2_ov;
         dnn_module->execute_model2 = &ff_dnn_execute_model_2_ov;
         dnn_module->execute_model_async2 = &ff_dnn_execute_model_async_2_ov;
