@@ -608,7 +608,7 @@ static int activate(AVFilterContext *filter_ctx)
         // drain all processed frames
         do {
             async_state = (ctx->dnn_module->get_async_result)(ctx->model, &output);
-            av_log(filter_ctx, AV_LOG_INFO, "async state : %d.\n", async_state);
+            //av_log(filter_ctx, AV_LOG_INFO, "async state : %d.\n", async_state);
             if (output) {
                 int ret_val = ff_filter_frame(outlink, output);
                 if (ret_val < 0)

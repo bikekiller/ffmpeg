@@ -279,6 +279,7 @@ DNNModel *ff_dnn_load_model_ov(const char *model_filename, const char *options)
     IEStatusCode status;
     ie_config_t config = {NULL, NULL, NULL};
     input_shapes_t network_input_shapes;
+    int batch_size;
 
     model = av_malloc(sizeof(DNNModel));
     if (!model){
@@ -302,11 +303,13 @@ DNNModel *ff_dnn_load_model_ov(const char *model_filename, const char *options)
         goto err;
 
     // FIXME: get the batch size from user option
-    // FIXME: not only reshape for the first input blob
-    network_input_shapes.shapes[0].shape.dims[0] = DEFAULT_BATCH_SIZE; 
-    status = ie_network_reshape(ov_model->network, network_input_shapes);
-    if (status != OK)
-        goto err;
+    batch_size = DEFAULT_BATCH_SIZE;
+
+    if (batch_size > 1 && network_input_shapes.shapes) {
+        for (int i = 0; i < network_input_shapes.shape_num; i++)
+            network_input_shapes.shapes[i].shape.dims[0] = batch_size;
+        ie_network_reshape(ov_model->network, network_input_shapes);
+    }
     ie_network_input_shapes_free(&network_input_shapes);
 
     status = ie_core_load_network(ov_model->core, ov_model->network, "CPU", &config, &ov_model->exe_network);
@@ -484,7 +487,6 @@ static void completion_callback_batch_infer(void *args)
 
     pthread_mutex_lock(&ov_model->callback_mutex);
 
-    av_log(NULL, AV_LOG_INFO, "~~~~~~~~~~~~~ completion_callback_batch_infer\n");
     // get output blob
     if (request->blob_name)
        blob_name = av_strdup(request->blob_name);
@@ -546,7 +548,7 @@ static void completion_callback_batch_infer(void *args)
         processing_frames->pop_front(processing_frames);
         av_free(front);
     }
-    av_log(NULL, AV_LOG_INFO, "processing frames (%ld), processed frames (%ld)\n", processing_frames->size(processing_frames), processed->size(processed));
+    //av_log(NULL, AV_LOG_INFO, "processing frames (%ld), processed frames (%ld)\n", processing_frames->size(processing_frames), processed->size(processed));
     pthread_mutex_unlock(&ov_model->frame_q_mutex);
 
     if (request->blob_name) {
@@ -641,7 +643,7 @@ void ff_dnn_flush_ov(const DNNModel *model)
 
    RequestContext *request_ctx = (RequestContext *)SafeQueuePop(ov_model->request_ctx_q);
    
-   av_log(NULL, AV_LOG_INFO, "flush %d cached frames, batch_size: %d\n", request_ctx->num_processing_frames, ov_model->batch_size);
+   //av_log(NULL, AV_LOG_INFO, "flush %d cached frames, batch_size: %d\n", request_ctx->num_processing_frames, ov_model->batch_size);
 
    request_ctx->callback.completeCallBackFunc = completion_callback_batch_infer;
    request_ctx->callback.args = request_ctx;
@@ -692,8 +694,6 @@ DNNReturnType ff_dnn_execute_model_async_ov(const DNNModel *model, AVFrame *in, 
        request_ctx->callback.completeCallBackFunc = completion_callback_batch_infer;
        request_ctx->callback.args = request_ctx;
        request_ctx->model = model;
-
-       av_log(NULL, AV_LOG_INFO, "~~~~~~~~~~~~~ infer async\n");
 
        ie_infer_set_completion_callback(request_ctx->infer_request, &request_ctx->callback);
        ie_infer_request_infer_async(request_ctx->infer_request);
