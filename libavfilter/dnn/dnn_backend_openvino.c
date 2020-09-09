@@ -96,27 +96,30 @@ static void new_blob_by_batch_idx(OVModel *ov_model, DNNData *input_blob, DNNDat
    return;
 }
 
-static DNNReturnType execute_model(OVModel *ov_model, DNNData *output, const char *output_name)
+static DNNReturnType _execute_model(OVModel *ov_model, DNNData *output, const char *output_name, ie_blob_t **ie_blob_out)
 {
     dimensions_t dims;
     precision_e precision;
-    ie_blob_t *out_blob;
     ie_blob_buffer_t blob_buffer;
     IEStatusCode status;
 
     av_assert0(ov_model->infer_request);
+
+    *ie_blob_out == NULL;
+
     status = ie_infer_request_infer(ov_model->infer_request);
     if (status != OK)
-        return DNN_ERROR;
+       goto error;
 
-    status = ie_infer_request_get_blob(ov_model->infer_request, output_name, &out_blob);
+    status = ie_infer_request_get_blob(ov_model->infer_request, output_name, ie_blob_out);
     if (status != OK)
-       return DNN_ERROR;
-    status |= ie_blob_get_buffer(out_blob, &blob_buffer);
-    status |= ie_blob_get_dims(out_blob, &dims);
-    status |= ie_blob_get_precision(out_blob, &precision);
+       goto error;
+
+    status |= ie_blob_get_buffer(*ie_blob_out, &blob_buffer);
+    status |= ie_blob_get_dims(*ie_blob_out, &dims);
+    status |= ie_blob_get_precision(*ie_blob_out, &precision);
     if (status != OK)
-       return DNN_ERROR;
+       goto error;
 
     output->channels = dims.dims[1];
     output->height   = dims.dims[2];
@@ -125,6 +128,14 @@ static DNNReturnType execute_model(OVModel *ov_model, DNNData *output, const cha
     output->data     = blob_buffer.buffer;
 
     return DNN_SUCCESS;
+
+error:
+    if (*ie_blob_out) {
+       ie_blob_free(ie_blob_out);
+       *ie_blob_out == NULL;
+    }
+
+    return DNN_ERROR;
 }
 
 static DNNReturnType get_input_ov(void *model, DNNData *input, const char *input_name)
@@ -269,7 +280,15 @@ err:
 
 static DNNReturnType get_output_ov(void *model, DNNData *output, const char *output_name)
 {
-   return execute_model((OVModel *)model, output, output_name);
+   DNNReturnType ret;
+   ie_blob_t *out_blob;
+
+   ret = _execute_model((OVModel *)model, output, output_name, &out_blob);
+
+   if (out_blob)
+      ie_blob_free(&out_blob);
+
+   return ret;
 }
 
 DNNModel *ff_dnn_load_model_ov(const char *model_filename, const char *options)
@@ -568,7 +587,7 @@ out:
 
 DNNModel *ff_dnn_load_model_2_ov(const char *model_filename, const char *options, void *user_data)
 {
-    DNNModel *dnn_model = ff_dnn_load_model_ov(model_filename);
+    DNNModel *dnn_model = ff_dnn_load_model_ov(model_filename, options);
     OVModel *ov_model = dnn_model->model;
 
     // TODO: parse options
@@ -590,6 +609,8 @@ DNNReturnType ff_dnn_execute_model_2_ov(const DNNModel *model, AVFrame *in, cons
 {
    DNNData input_blob, output;
    OVModel *ov_model;
+   ie_blob_t *out_blob;
+   DNNReturnType ret;
 
    // FIXME: to support more than 1 output?
    av_assert0(nb_output == 1);
@@ -610,10 +631,15 @@ DNNReturnType ff_dnn_execute_model_2_ov(const DNNModel *model, AVFrame *in, cons
    }
    ((DNNPreProc)(model->pre_proc))(in, &input_blob, ov_model->user_data);
 
-   if (DNN_SUCCESS != execute_model(ov_model, &output, output_names[0]))
+   if (DNN_SUCCESS != _execute_model(ov_model, &output, output_names[0], &out_blob))
       return AVERROR(EINVAL);
 
-   return ((DNNPostProc)model->post_proc)(&output, in, out, ov_model->user_data);
+   ret = ((DNNPostProc)model->post_proc)(&output, in, out, ov_model->user_data);
+
+   if (out_blob)
+      ie_blob_free(&out_blob);
+
+   return ret;
 }
 
 static int create_and_enqueue_processing_frame(OVModel *ov_model, AVFrame *in, RequestContext *request_ctx)
