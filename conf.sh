@@ -1,0 +1,18 @@
+PATH="$HOME/bin:$PATH" PKG_CONFIG_PATH="$HOME/ffmpeg_build/lib/pkgconfig" ./configure \
+  --prefix="$HOME/ffmpeg_build" \
+  --extra-cflags="-I$HOME/ffmpeg_build/include" \
+  --extra-ldflags="-L$HOME/ffmpeg_build/lib" \
+  --extra-libs="-lpthread -lm" \
+  --bindir="$HOME/bin" \
+  --enable-shared --disable-static --disable-optimizations --disable-mmx --disable-stripping \
+  --enable-gpl \
+  --enable-gnutls \
+  --enable-libfreetype \
+  --enable-libvorbis \
+  --enable-libvpx \
+  --enable-libx264 \
+  --enable-libx265 \
+  --enable-nonfree \
+  --enable-libopenvino \
+  --extra-cflags=-I/usr/local/deployment_tools/inference_engine/include/ \
+  --extra-ldflags=-L/usr/local/deployment_tools/inference_engine/lib/intel64
