@@ -35,10 +35,17 @@ typedef enum {DNN_NATIVE, DNN_TF, DNN_OV} DNNBackendType;
 
 typedef enum {DNN_FLOAT = 1, DNN_UINT8 = 4} DNNDataType;
 
+typedef enum {
+    DAST_FAIL = -2,        // something wrong
+    DAST_EMPTY_QUEUE = -1, // no more inference result to get
+    DAST_NOT_READY,        // all queued inferences are not finished
+    DAST_SUCCESS           // got a result frame successfully
+} DNNAsyncStatusType;
+
 typedef struct DNNData{
     void *data;
     DNNDataType dt;
-    int width, height, channels;
+    int width, height, channels, batch_size;
 } DNNData;
 
 typedef struct DNNModel{
@@ -69,6 +76,13 @@ typedef struct DNNModule{
     // Executes model with specified input and output. Returns DNN_ERROR otherwise.
     DNNReturnType (*execute_model)(const DNNModel *model, const char *input_name, AVFrame *in_frame,
                                    const char **output_names, uint32_t nb_output, AVFrame *out_frame);
+    // Executes model with specified input and output asynchronously. Returns DNN_ERROR otherwise.
+    DNNReturnType (*execute_model_async)(const DNNModel *model, const char *input_name, AVFrame *in_frame,
+                                         const char **output_names, uint32_t nb_output, AVFrame *out_frame);
+    // Flush queued inference request.
+    void (*flush)(const DNNModel *model);
+    // Retrieve inference result.
+    DNNAsyncStatusType (*get_async_result)(const DNNModel *model, AVFrame **out);
     // Frees memory allocated for model.
     void (*free_model)(DNNModel **model);
 } DNNModule;
